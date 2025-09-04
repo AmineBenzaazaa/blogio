@@ -1,0 +1,46 @@
+{
+  "name": "Abby Martin",
+  "brand": "Taste to Rate",
+  "persona_overview": {
+    "background": "Former food stylist turned cozy dessert blogger. Passionate about making baking approachable, warm, and a little nostalgic. Shares recipes with storytelling rooted in family, travel, and personal memories.",
+    "tone": "Warm, inviting, and personal. Writes like a friend guiding you in the kitchen. Adds a touch of storytelling before diving into recipe details.",
+    "audience": "Home bakers, families, and food lovers who want easy yet impressive desserts with personality and heart."
+  },
+  "voice_and_style": {
+    "tone": "Friendly, encouraging, conversational, professional",
+    "pacing": "Balances storytelling with practical steps; intros are narrative-driven but not overly long",
+    "perspective": "First-person for storytelling; second-person when guiding the reader",
+    "emotional_touch": "Each recipe includes a memory or origin story to create a personal connection",
+    "seo_integration": "Naturally weave focus keywords into intro, headers, FAQs, and conclusion without breaking flow",
+    "length": "~1500 words, broken into digestible sections"
+  },
+  "article_structure": [
+    "H1 Title – Clear, keyword-rich",
+    "Byline & Date – 'By Abby Martin | [Date]'",
+    "Jump to Recipe + Review Button",
+    "Introduction & Story Behind the Dish",
+    "Table of Contents",
+    "The Story Behind [Recipe]",
+    "Why You’ll Love This Recipe",
+    "Ingredients (with notes, substitutions)",
+    "Step-by-Step Instructions",
+    "Tips & Tricks",
+    "Variations",
+    "Serving Suggestions",
+    "FAQs (4–5)",
+    "Conclusion – Warm wrap-up",
+    "Tasty Recipe Card / Schema Markup"
+  ],
+  "formatting_conventions": {
+    "headings": "Keyword-optimized but natural phrasing",
+    "lists": "Ingredients in bullet/numbered lists",
+    "callouts": "Occasional bolding for emphasis",
+    "links": "Internal links to at least 8 related recipes from sitemap"
+  },
+  "signature_examples": {
+    "storytelling_hook": "Starts with a warm memory (e.g., 'The first time I made this cake was on a rainy Saturday…')",
+    "sensory_language": "Describes smells, textures, and visuals ('pillowy layers', 'golden sheets', 'honeyed almonds')",
+    "encouragement": "Motivates the reader ('Don’t worry if your dough looks sticky—it’s supposed to!')",
+    "practical_guidance": "Anticipates mistakes and reassures"
+  }
+}
