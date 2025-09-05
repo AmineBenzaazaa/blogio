@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import streamlit as st
 
 # ---------- OpenAI client (optional) ----------
-# You can set OPENAI_API_KEY in env or in the UI sidebar.
+# You can set API_KEY in env or in the UI sidebar.
 try:
     from openai import OpenAI
 except Exception:
@@ -29,7 +29,7 @@ except Exception:
 
 def _ensure_openai_client() -> Optional[Any]:
     """Initialize OpenAI client if available and API key present."""
-    api_key = os.getenv("OPENAI_API_KEY") or st.session_state.get("OPENAI_API_KEY")
+    api_key = os.getenv("API_KEY") or st.session_state.get("API_KEY")
     if OpenAI is None or not api_key:
         return None
     try:
@@ -728,7 +728,7 @@ st.set_page_config(page_title="Recipe Generator + Tasty JS + JSON-LD", page_icon
 
 with st.sidebar:
     st.header("Settings")
-    st.session_state["OPENAI_API_KEY"] = st.text_input("OpenAI API Key", os.getenv("OPENAI_API_KEY", ""), type="password")
+    st.session_state["API_KEY"] = st.text_input("API Key", os.getenv("API_KEY", ""), type="password")
     st.session_state["model_name"] = st.text_input("Model", st.session_state.get("model_name", "gpt-4o-mini"))
     st.session_state["temperature"] = st.slider("Temperature", 0.0, 1.2, float(st.session_state.get("temperature", 0.6)), 0.05)
 
