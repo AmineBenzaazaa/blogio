@@ -1439,8 +1439,6 @@ def generate_random_seed() -> int:
     import random
     return random.randint(1000, 9999999)
 
-
-
 def generate_midjourney_prompts(article_content: str, topic: str, focus_keyword: str = "", model: str = "gpt-4.1") -> dict:
     """
     Generate 7 MidJourney image prompts with comprehensive SEO metadata and placement information.
@@ -2383,31 +2381,17 @@ with col1:
                     st.code(metadata.get('twitter_description', 'N/A'), language=None)
             
             with tab3:
-                st.markdown("#### Schema Markup")
-                schema_elements = metadata.get('schema_elements', {})
-                
-                st.markdown("**Schema Type:**")
-                st.code(metadata.get('schema_type', 'Recipe'), language=None)
-                
-                if schema_elements:
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.markdown("**Recipe Name:**")
-                        st.code(schema_elements.get('name', 'N/A'), language=None)
-                        
-                        st.markdown("**Recipe Category:**")
-                        st.code(schema_elements.get('recipeCategory', 'N/A'), language=None)
-                    
-                    with col2:
-                        st.markdown("**Recipe Cuisine:**")
-                        st.code(schema_elements.get('recipeCuisine', 'N/A'), language=None)
-                        
-                        st.markdown("**Keywords:**")
-                        st.code(schema_elements.get('keywords', 'N/A'), language=None)
-                    
-                    st.markdown("**Schema Description:**")
-                    st.code(schema_elements.get('description', 'N/A'), language=None)
+                st.markdown("#### Recipe JSON-LD (Rank Math / Google)")
+                site_url = st.text_input("Site URL for mainEntityOfPage", value="https://tastetorate.com/")
+                if st.button("Generate Recipe Schema", type="primary"):
+                    try:
+                        schema_dict = build_recipe_json_ld(metadata, site_url=site_url)
+                        schema_json = json.dumps(schema_dict, ensure_ascii=False, indent=2)
+                        st.code(schema_json, language="json")
+                        st.download_button("Download recipe.schema.json", schema_json, file_name="recipe.schema.json", mime="application/ld+json")
+                    except Exception as e:
+                        st.error(f"Schema build failed: {e}")
+
             
             with tab4:
                 st.markdown("#### Copy-Ready Text for Manual Entry")
@@ -3464,3 +3448,177 @@ with st.container():
 
 if st.session_state.get("auto_post") and st.session_state.get("generated_md"):
     st.info("Auto-post is enabled. Click 'Post to WordPress' to publish the current draft.")
+
+
+# -----------------------------
+# Recipe JSON-LD (Schema.org) builder
+# Builds a Google/Rank Math compatible Recipe JSON-LD using only existing metadata.
+# -----------------------------
+def _normalize_list_for_schema(value):
+    import re
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if isinstance(x, (str,int,float)) and str(x).strip()]
+    if isinstance(value, str):
+        # split on newlines
+        items = [ln.strip() for ln in value.splitlines() if ln.strip()]
+        # strip bullets / numbering
+        items = [re.sub(r'^\s*[\-\u2022\*]?\s*', '', it) for it in items]
+        items = [re.sub(r'^\s*\d+[\)\.\-\s]*', '', it) for it in items]
+        return [it.strip() for it in items if it.strip()]
+    return []
+
+def _to_iso8601_duration(value):
+    """Accepts strings like '1h 30m', '90 min', '45', 'PT45M' or numeric minutes and returns ISO8601 duration."""
+    import re
+    if not value and value != 0:
+        return None
+    if isinstance(value, (int, float)):
+        mins = int(value)
+        return f"PT{mins}M"
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        # Already ISO8601
+        if s.upper().startswith("PT"):
+            return s.upper()
+        low = s.lower()
+        # Extract hours/minutes
+        matches = re.findall(r'(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m)\b', low)
+        if matches:
+            total_h = 0
+            total_m = 0
+            for num, unit in matches:
+                n = int(num)
+                if unit.startswith('h'):
+                    total_h += n
+                else:
+                    total_m += n
+            if total_h == 0 and total_m == 0:
+                return None
+            if total_h and total_m:
+                return f"PT{total_h}H{total_m}M"
+            if total_h:
+                return f"PT{total_h}H"
+            return f"PT{total_m}M"
+        # Pure integer string -> minutes
+        if low.isdigit():
+            return f"PT{int(low)}M"
+    return None
+
+def build_recipe_json_ld(metadata: dict, site_url: str = "https://tastetorate.com/") -> dict:
+    """
+    Build a minimal-but-complete Recipe JSON-LD (Schema.org) that Google Rich Results accepts.
+    Uses only fields present in `metadata` to avoid made-up values.
+    """
+    m = metadata or {}
+    schema = {"@context": "https://schema.org", "@type": "Recipe"}
+
+    # Prefer explicit schema_elements, then top-level metadata
+    se = m.get("schema_elements") or {}
+
+    def _first(*keys):
+        for k in keys:
+            v = se.get(k) if isinstance(se, dict) and k in se else m.get(k)
+            if v:
+                return v
+        return None
+
+    # Basic identity
+    name = _first("name", "recipe_name", "title")
+    if name: schema["name"] = name
+
+    desc = _first("description", "recipe_description", "description")
+    if desc: schema["description"] = desc
+
+    # Image(s)
+    images = []
+    for key in ("image", "images", "featured_image", "cover_image"):
+        v = _first(key)
+        if isinstance(v, str) and v.strip():
+            images.append(v.strip())
+        elif isinstance(v, list):
+            images.extend([str(x).strip() for x in v if isinstance(x, (str,int,float)) and str(x).strip()])
+    if images:
+        schema["image"] = images if len(images) > 1 else images[0]
+
+    # Author (only if provided)
+    author = _first("author", "author_name")
+    if isinstance(author, dict):
+        schema["author"] = {"@type": author.get("@type", "Person"), "name": author.get("name")}
+    elif isinstance(author, str):
+        schema["author"] = {"@type": "Person", "name": author}
+
+    # Category / Cuisine / Keywords
+    rc = _first("recipeCategory", "category")
+    if rc: schema["recipeCategory"] = rc
+    rcu = _first("recipeCuisine", "cuisine")
+    if rcu: schema["recipeCuisine"] = rcu
+
+    kws = _first("keywords", "tags")
+    if isinstance(kws, list):
+        kws = ", ".join([str(x).strip() for x in kws if str(x).strip()])
+    if isinstance(kws, str) and kws.strip():
+        schema["keywords"] = kws.strip()
+
+    # Yield / Servings
+    ry = _first("recipeYield", "servings", "yield")
+    if ry: schema["recipeYield"] = str(ry)
+
+    # Durations
+    pt = _first("prepTime", "prep_time")
+    ct = _first("cookTime", "cook_time")
+    tt = _first("totalTime", "total_time")
+    pt_iso = _to_iso8601_duration(pt)
+    ct_iso = _to_iso8601_duration(ct)
+    tt_iso = _to_iso8601_duration(tt)
+    if pt_iso: schema["prepTime"] = pt_iso
+    if ct_iso: schema["cookTime"] = ct_iso
+    if tt_iso: schema["totalTime"] = tt_iso
+
+    # Ingredients
+    ingredients = _first("recipeIngredient", "ingredients")
+    ing_list = _normalize_list_for_schema(ingredients)
+    if ing_list:
+        schema["recipeIngredient"] = ing_list
+
+    # Instructions -> HowToStep[]
+    instructions = _first("recipeInstructions", "instructions")
+    steps = _normalize_list_for_schema(instructions)
+    if steps:
+        schema["recipeInstructions"] = [{"@type": "HowToStep", "text": s} for s in steps]
+
+    # Nutrition (only if present)
+    nutrition = _first("nutrition")
+    if isinstance(nutrition, dict) and any(str(v).strip() for v in nutrition.values() if v is not None):
+        ni = {"@type": "NutritionInformation"}
+        for k, v in nutrition.items():
+            if v is not None and str(v).strip():
+                ni[k] = v
+        if len(ni) > 1:
+            schema["nutrition"] = ni
+
+    # Aggregate rating / reviews if available
+    ar = _first("aggregateRating")
+    if isinstance(ar, dict) and "ratingValue" in ar:
+        schema["aggregateRating"] = ar
+
+    # mainEntityOfPage if we know a perma URL/slug
+    permalink = _first("permalink", "url", "slug")
+    if isinstance(permalink, str) and permalink.strip():
+        page_url = permalink if permalink.startswith("http") else site_url.rstrip("/") + "/" + permalink.lstrip("/")
+        schema["mainEntityOfPage"] = {"@type": "WebPage", "@id": page_url}
+
+    # Optional publisher if explicitly provided (not fabricated)
+    publisher = _first("publisher")
+    if isinstance(publisher, dict) and publisher.get("name"):
+        pub = {"@type": publisher.get("@type", "Organization"), "name": publisher.get("name")}
+        logo = publisher.get("logo")
+        if isinstance(logo, (str, dict)) and logo:
+            pub["logo"] = logo
+        schema["publisher"] = pub
+
+    return schema
+
