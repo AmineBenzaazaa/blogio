@@ -1,5 +1,5 @@
 {
-  "OPENAI_API_KEY": "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",
+  "OPENAI_API_KEY": "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",
   "fb_url": "https://www.facebook.com/tastetorate",
   "pin_url": "https://www.pinterest.com/tastetorate",
   "append_cta": true,
@@ -292,7 +292,6 @@
   "wp_app_pw": "5Ojn xZ4R AD4v caq1 XFOx 9EpS",
   "wp_status": "draft",
   "wp_categories": "Recipes",
-
   "wp_excerpt": "",
   "feat_url": "",
   "auto_post": true,

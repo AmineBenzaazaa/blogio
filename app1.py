@@ -502,6 +502,404 @@ def parse_recipe_text_blocks(recipe_text: str) -> Dict[str, Any]:
         "totalISO": total_iso,
     }
 
+def _make_recipe_halal(recipe: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of recipe with certain ingredients replaced by suitable alternatives.
+    Does not add any explicit mention of dietary terms in text; simply swaps items in-place."""
+    if not recipe:
+        return recipe
+    # Patterns cover common non-permitted items and typical variants; replacements are culinary equivalents.
+    replacements = [
+        (r"\b(pork|bacon|ham|prosciutto|pancetta)\b", "turkey bacon"),
+        (r"\bpork\s+sausage\b", "turkey sausage"),
+        (r"\bpepperoni\b", "beef pepperoni"),
+        (r"\bsalami\b", "beef salami"),
+        (r"\bchorizo\b", "turkey chorizo"),
+        (r"\blard\b", "vegetable shortening"),
+        (r"\bgelatin\b", "agar-agar powder"),
+        (r"\bmirin\b", "rice vinegar + sugar"),
+        (r"\b(?:red|white)?\s*wine\b", "grape juice + a splash of vinegar"),
+        (r"\bsherry\b", "apple cider vinegar + apple juice"),
+        (r"\b(beer|ale|lager)\b", "apple cider + a splash of vinegar"),
+        (r"\brum\b", "molasses + apple juice"),
+        (r"\bbrandy\b", "apple juice"),
+        (r"\b(bourbon|whiskey|whisky)\b", "apple cider + vanilla bean paste"),
+        (r"\bbacon grease\b", "olive oil"),
+        (r"\bprosciutto\b", "turkey ham"),
+        (r"\bvanilla extract\b", "vanilla bean paste"),
+    ]
+    def _repl_text(t: str) -> str:
+        if not t:
+            return t
+        for pat, rep in replacements:
+            t = re.sub(pat, rep, t, flags=re.IGNORECASE)
+        return t
+    new_recipe = dict(recipe)
+    new_recipe["description"] = _repl_text(recipe.get("description", ""))
+    new_recipe["ingredients"] = [_repl_text(x) for x in recipe.get("ingredients", [])]
+    new_recipe["instructions"] = [_repl_text(x) for x in recipe.get("instructions", [])]
+    new_recipe["notes"] = [_repl_text(x) for x in recipe.get("notes", [])]
+    new_recipe["keywords"] = [_repl_text(x) for x in recipe.get("keywords", [])]
+    if isinstance(recipe.get("nutrition"), dict):
+        new_recipe["nutrition"] = {k: _repl_text(v) for k, v in recipe["nutrition"].items()}
+    return new_recipe
+
+
+def _extract_recipe_from_article_md(md: str) -> Dict[str, Any]:
+    """Heuristic extraction of recipe sections from article markdown, then parsed via parse_recipe_text_blocks."""
+    if not md:
+        return {}
+    import re as _re
+
+    def _find_section(md_text: str, names: list) -> str:
+        for nm in names:
+            m = _re.search(rf"(^|\n)#+\s*{nm}\s*\n(.*?)(?=\n#+\s|\Z)", md_text, flags=_re.IGNORECASE | _re.DOTALL)
+            if m:
+                return m.group(2).strip()
+        return ""
+
+    def _parse_list(block: str) -> list:
+        items = []
+        for line in block.splitlines():
+            if _re.match(r"^\s*[-*]\s+", line):
+                items.append(_re.sub(r"^\s*[-*]\s+", "", line).strip())
+            elif _re.match(r"^\s*\d+[\.\)]\s+", line):
+                items.append(_re.sub(r"^\s*\d+[\.\)]\s+", "", line).strip())
+        return [i for i in items if i]
+
+    # Title
+    title_match = _re.search(r"^\s*#\s+(.+)$", md, flags=_re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else (st.session_state.get("seo_title") or st.session_state.get("topic") or "Recipe").strip()
+
+    # Description: first paragraph after title
+    desc = ""
+    if title_match:
+        start = title_match.end()
+        next_h = _re.search(r"\n#{1,6}\s", md[start:], flags=_re.MULTILINE)
+        block = md[start: start + next_h.start()] if next_h else md[start:]
+        paras = [p.strip() for p in _re.split(r"\n\s*\n", block) if p.strip()]
+        if paras:
+            desc = paras[0]
+
+    # Sections
+    ingredients_block = _find_section(md, ["ingredients"])
+    instructions_block = _find_section(md, ["instructions", "method", "directions"])
+    notes_block = _find_section(md, ["notes", "note"]) or ""
+
+    ingredients = _parse_list(ingredients_block)
+    instructions = _parse_list(instructions_block)
+    notes = _parse_list(notes_block) if notes_block else []
+
+    # Meta
+    prep = _re.search(r"prep\s*time\s*[:\-]\s*([^\n]+)", md, flags=_re.IGNORECASE)
+    cook = _re.search(r"cook\s*time\s*[:\-]\s*([^\n]+)", md, flags=_re.IGNORECASE)
+    total = _re.search(r"total\s*time\s*[:\-]\s*([^\n]+)", md, flags=_re.IGNORECASE)
+    yld = _re.search(r"(yield|servings?)\s*[:\-]\s*([^\n]+)", md, flags=_re.IGNORECASE)
+
+    # Build a minimal normalized text to feed into existing forgiving parser
+    lines = [title, desc]
+    if prep: lines.append(f"Prep Time: {prep.group(1).strip()}")
+    if cook: lines.append(f"Cook Time: {cook.group(1).strip()}")
+    if total: lines.append(f"Total Time: {total.group(1).strip()}")
+    if yld: lines.append(f"Yield: {yld.group(2).strip()}")
+
+    if ingredients:
+        lines.append("Ingredients")
+        lines.extend(ingredients)
+    if instructions:
+        lines.append("Instructions")
+        lines.extend(instructions)
+    if notes:
+        lines.append("Notes")
+        lines.extend(notes)
+
+    normalized_text = "\n".join(lines)
+    try:
+        return parse_recipe_text_blocks(normalized_text)
+    except Exception:
+        return {}
+
+
+def generate_js_recipe_card(recipe: Dict[str, Any]) -> str:
+    """Generate pure JavaScript fillRecipeForm() function for Tasty Recipe CPT integration."""
+    import json
+
+    def js_escape(text: str) -> str:
+        if not text:
+            return ""
+        return (
+            text.replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace("\n", "\\n")
+                .replace("\r", "")
+        )
+
+    def format_list_for_js(items: List[str], formatter: str = "p") -> str:
+        if not items:
+            return ""
+        escaped_items = [js_escape(item) for item in items]
+        # The JS helpers (p/n) will wrap/number them in the editor:
+        return "\\n".join(escaped_items)
+
+    # Rich-text fields
+    description = js_escape(recipe.get("description", ""))
+    ingredients = format_list_for_js(recipe.get("ingredients", []), "p")
+    instructions = format_list_for_js(recipe.get("instructions", []), "n")
+    notes = format_list_for_js(recipe.get("notes", []), "p")
+
+    # Title/Author/Servings
+    title = js_escape(recipe.get("title", ""))
+    author = js_escape(recipe.get("author", ""))
+    servings_value = js_escape(str(recipe.get("servings", "") or ""))
+
+    # ISO -> minutes for details
+    def iso_to_minutes(iso_time: str) -> str:
+        if not iso_time:
+            return ""
+        import re as _re
+        h = _re.search(r"(\d+)\s*H", iso_time, _re.I)
+        m = _re.search(r"(\d+)\s*M", iso_time, _re.I)
+        total = 0
+        if h: total += int(h.group(1)) * 60
+        if m: total += int(m.group(1))
+        return str(total) if total else ""
+
+    prep_time = iso_to_minutes(recipe.get("prepISO", ""))
+    cook_time = iso_to_minutes(recipe.get("cookISO", ""))
+    total_time = iso_to_minutes(recipe.get("totalISO", ""))
+    additional_time = iso_to_minutes(
+        recipe.get("additionalISO") or recipe.get("restISO") or recipe.get("inactiveISO") or ""
+    )
+
+    # If total is missing, compute from parts
+    if not total_time:
+        mins = 0
+        for t in (prep_time, cook_time, additional_time):
+            try:
+                mins += int(t) if t else 0
+            except Exception:
+                pass
+        total_time = str(mins) if mins else ""
+
+    # Other detail fields
+    yield_value = js_escape(recipe.get("yield", ""))
+    category = js_escape(recipe.get("category", ""))
+    method = js_escape(recipe.get("method", ""))
+    cuisine = js_escape(recipe.get("cuisine", ""))
+    diet = js_escape(recipe.get("diet", ""))
+    keywords = js_escape(", ".join(recipe.get("keywords", [])))
+
+    # Nutrition (accept normalized keys)
+    nutrition = recipe.get("nutrition", {}) or {}
+    serving_size = js_escape(nutrition.get("Serving Size", "") or recipe.get("serving_size", ""))
+    calories = js_escape(nutrition.get("Calories", "") or recipe.get("calories", ""))
+    sugar = js_escape(nutrition.get("Sugar", "") or recipe.get("sugar", ""))
+    sodium = js_escape(nutrition.get("Sodium", "") or recipe.get("sodium", ""))
+    fat = js_escape(nutrition.get("Total Fat", "") or recipe.get("fat", ""))
+    saturated_fat = js_escape(nutrition.get("Saturated Fat", "") or recipe.get("saturated_fat", ""))
+    unsaturated_fat = js_escape(nutrition.get("Unsaturated Fat", "") or recipe.get("unsaturated_fat", ""))
+    trans_fat = js_escape(nutrition.get("Trans Fat", "") or recipe.get("trans_fat", ""))
+    cholesterol = js_escape(nutrition.get("Cholesterol", "") or recipe.get("cholesterol", ""))
+    carbohydrates = js_escape(nutrition.get("Carbohydrates", "") or recipe.get("carbohydrates", ""))
+    fiber = js_escape(nutrition.get("Fiber", "") or recipe.get("fiber", ""))
+    protein = js_escape(nutrition.get("Protein", "") or recipe.get("protein", ""))
+
+    js_code = f"""function fillRecipeForm() {{
+const f=(s,v)=>document.querySelector(s)&&(document.querySelector(s).value=v),
+p=t=>t.split('\\n').map(x=>`<p>${{x}}</p>`).join(''),
+n=t=>t.split('\\n').map((x,i)=>`<p>${{i+1}}. ${{x}}</p>`).join(''),
+g={{
+description:'{description}',
+ingredients:p('{ingredients}'),
+instructions:n('{instructions}'),
+notes:p('{notes}')
+}};
+
+// 1) Fill the WYSIWYG fields (Tasty uses TinyMCE editors with these IDs)
+for (const k in g) {{
+  const ed = window.tinyMCE?.get(`tasty-recipes-recipe-${{k}}`);
+  ed && ed.setContent(g[k]);
+}}
+
+// 2) Title (Gutenberg or Classic) and Author Name
+f('textarea.editor-post-title__input, #title, input[name="post_title"]','{title}');
+['input[name="author_name"]','#tasty-recipes-author-name','input[name="author"]']
+  .forEach(sel => f(sel,'{author}'));
+
+// 3) Details fields (accepts both presence/absence of inputs)
+[
+ "prep_time","cook_time","additional_time","total_time","yield",
+ "servings","category","method","cuisine","diet","keywords",
+ "serving_size","calories","sugar","sodium","fat","saturated_fat","unsaturated_fat",
+ "trans_fat","cholesterol","carbohydrates","fiber","protein"
+].forEach(k => f(`[name="${{k}}"]`, {{
+  prep_time:'{prep_time}',
+  cook_time:'{cook_time}',
+  additional_time:'{additional_time}',
+  total_time:'{total_time}',
+  yield:'{yield_value}',
+  servings:'{servings_value}',
+  category:'{category}',
+  method:'{method}',
+  cuisine:'{cuisine}',
+  diet:'{diet}',
+  keywords:'{keywords}',
+  serving_size:'{serving_size}',
+  calories:'{calories}',
+  sugar:'{sugar}',
+  sodium:'{sodium}',
+  fat:'{fat}',
+  saturated_fat:'{saturated_fat}',
+  unsaturated_fat:'{unsaturated_fat}',
+  trans_fat:'{trans_fat}',
+  cholesterol:'{cholesterol}',
+  carbohydrates:'{carbohydrates}',
+  fiber:'{fiber}',
+  protein:'{protein}'
+}}[k] ));
+}}
+fillRecipeForm();"""
+
+    return js_code
+def synthesize_recipe_from_context(
+    topic: str = "",
+    focus_keyword: str = "",
+    full_recipe_text: str = "",
+    article_md: str = "",
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Use the LLM to synthesize a well-organized recipe text from context, then parse it
+    with parse_recipe_text_blocks. Returns {} on failure.
+
+    Improvements:
+    - Adds "Additional time" to the target format (rest/chill/inactive).
+    - Expands Nutrition to a richer, parser-friendly set.
+    - Clips context to keep requests reliable.
+    - Validates output; retries once with a stricter prompt if fields are missing.
+    """
+    try:
+        mdl = model or st.session_state.get("model_name", "gpt-4.1")
+        # keep temperature in a sane range
+        t_default = st.session_state.get("temperature", 0.6)
+        try:
+            t_val = float(temperature if temperature is not None else t_default)
+        except Exception:
+            t_val = float(t_default)
+        temp = min(max(t_val, 0.0), 1.2)
+
+        # ---- Build safe context ----
+        # Keep total prompt size modest to avoid truncation/latency.
+        CLIP = 6000
+        context_bits: List[str] = []
+        if full_recipe_text and full_recipe_text.strip():
+            context_bits.append("Full Recipe text provided by user:\n" + full_recipe_text.strip()[:CLIP])
+        if article_md and article_md.strip():
+            context_bits.append("Article content (markdown):\n" + article_md.strip()[:CLIP])
+        context = "\n\n".join(context_bits) or "No explicit recipe text was provided."
+
+        def base_prompt(strict: bool = False) -> str:
+            # When strict=True we add stronger constraints and reminders.
+            strict_rules = """
+- Output must include every section and field shown above, in the exact order.
+- If any detail is unknown, produce a reasonable, generic but coherent value (do not leave blank).
+- No prose, no storytelling, no brand/personal voice; only the required fields and lines.
+- Avoid special characters and emojis.
+            """.strip()
+
+            return f"""
+From the context below, synthesize a single, clean, well-organized recipe in PLAIN TEXT using EXACTLY this format so a simple parser can read it:
+
+Title on the first line
+Optional short description on the second line
+Prep time: <number> m or h m
+Cook time: <number> m or h m
+Additional time: <number> m or h m
+Total time: <number> m or h m
+Yield: <e.g., 4 servings or 1 loaf>
+Servings: <e.g., 4 servings>
+
+Ingredients
+- item 1
+- item 2
+- ...
+
+Instructions
+1. step 1
+2. step 2
+3. ...
+
+Notes
+- note line 1
+- note line 2
+
+Nutrition
+Serving Size: <value>
+Calories: <value>
+Sugar: <value>
+Sodium: <value>
+Total Fat: <value>
+Saturated Fat: <value>
+Unsaturated Fat: <value>
+Trans Fat: <value>
+Cholesterol: <value>
+Carbohydrates: <value>
+Fiber: <value>
+Protein: <value>
+
+Rules:
+- Use US measurements and realistic amounts.
+- Base details on the provided context faithfully; do not invent exotic, specific brand details.
+- Avoid any code fences, Markdown headings (#), or extra labeling not shown in the format.
+- Keep the title concise and descriptive.
+- Keep ingredient lines one per line; keep steps concise but precise.
+{"- Keep step count practical (6–12 steps) and avoid fluff." if strict else ""}
+{"- Absolutely no additional sections or lines beyond the exact format." if strict else ""}
+
+Context:
+Topic: {topic}
+Focus keyword: {focus_keyword}
+
+{context}
+""".strip()
+
+        def is_valid(parsed: Dict[str, Any]) -> bool:
+            """Basic sanity checks so we retry only when it's clearly malformed."""
+            if not parsed:
+                return False
+            if not (parsed.get("ingredients") and parsed.get("instructions")):
+                return False
+            # times: accept if we have at least prep or cook; prefer total present
+            has_any_time = any(parsed.get(k) for k in ("prepISO", "cookISO", "totalISO"))
+            if not has_any_time:
+                return False
+            # nutrition: check a few key fields (calories + macros)
+            nutr = (parsed.get("nutrition") or {}) if isinstance(parsed.get("nutrition"), dict) else {}
+            wanted = ["Calories", "Carbohydrates", "Protein", "Total Fat", "Sodium"]
+            if not all(k in nutr for k in wanted):
+                # allow a pass if calories and at least 3 others exist
+                keys_present = sum(1 for k in wanted if k in nutr)
+                if not ("Calories" in nutr and keys_present >= 4):
+                    return False
+            return True
+
+        # ---- First attempt ----
+        raw = _openai_text(base_prompt(strict=False), mdl, temp)
+        parsed = parse_recipe_text_blocks(raw)
+
+        # If invalid, retry once with stricter guardrails
+        if not is_valid(parsed):
+            raw2 = _openai_text(base_prompt(strict=True), mdl, max(0.3, temp - 0.2))
+            parsed2 = parse_recipe_text_blocks(raw2)
+            if is_valid(parsed2):
+                return parsed2
+            # fall back to first if second also fails but first had at least something
+            return parsed if parsed else {}
+
+        return parsed
+    except Exception:
+        return {}
+
 def html_recipe_fallback(recipe: Dict[str, Any]) -> str:
     """Generate a standardized recipe card using the brand template."""
     try:
@@ -1040,6 +1438,8 @@ def generate_random_seed() -> int:
     """
     import random
     return random.randint(1000, 9999999)
+
+
 
 def generate_midjourney_prompts(article_content: str, topic: str, focus_keyword: str = "", model: str = "gpt-4.1") -> dict:
     """
@@ -1657,9 +2057,9 @@ with st.sidebar:
             st.error(f"Sitemap fetch failed: {e}")
 
     # Linking knobs
-    max_links = st.slider("Max auto-links / article", 0, 30, st.session_state.get("max_links", 14))
+    max_links = st.slider("Max auto-links / article", 0, 30, st.session_state.get("max_links", 8))
     st.session_state["max_links"] = max_links
-    per_paragraph_max = st.slider("Max links / paragraph", 0, 10, st.session_state.get("per_paragraph_max", 3))
+    per_paragraph_max = st.slider("Max links / paragraph", 0, 10, st.session_state.get("per_paragraph_max", 2))
     st.session_state["per_paragraph_max"] = per_paragraph_max
     link_headings = st.checkbox("Also link inside headings", value=st.session_state.get("link_headings", False))
     st.session_state["link_headings"] = link_headings
@@ -1848,17 +2248,17 @@ with col1:
                     )
 
                     # Step 4: Add CTA
-                    status_text.text("📢 Adding call-to-action...")
-                    progress_bar.progress(90)
+                    # status_text.text("📢 Adding call-to-action...")
+                    # progress_bar.progress(90)
                     
-                    if st.session_state.get("append_cta"):
-                        fb = st.session_state.get("fb_url") or ""
-                        pin = st.session_state.get("pin_url") or ""
-                        cta_bits = []
-                        if fb: cta_bits.append(_wrap_link("Follow us on Facebook", _normalize_url(fb), st.session_state.get("link_style","html")))
-                        if pin: cta_bits.append(_wrap_link("Find us on Pinterest", _normalize_url(pin), st.session_state.get("link_style","html")))
-                        if cta_bits:
-                            content_linked += "\n\n" + " · ".join(cta_bits)
+                    # if st.session_state.get("append_cta"):
+                    #     fb = st.session_state.get("fb_url") or ""
+                    #     pin = st.session_state.get("pin_url") or ""
+                    #     cta_bits = []
+                    #     if fb: cta_bits.append(_wrap_link("Follow us on Facebook", _normalize_url(fb), st.session_state.get("link_style","html")))
+                    #     if pin: cta_bits.append(_wrap_link("Find us on Pinterest", _normalize_url(pin), st.session_state.get("link_style","html")))
+                    #     if cta_bits:
+                    #         content_linked += "\n\n" + " · ".join(cta_bits)
 
                     # Step 5: Complete
                     status_text.text("✅ Article generation complete!")
@@ -2069,6 +2469,47 @@ Description: {metadata.get('schema_elements', {}).get('description', 'N/A')}
 Generated: {metadata.get('generated_at', 'N/A')}"""
                 
                 st.text_area("Complete SEO Metadata (Copy All)", copy_text, height=400)
+                
+                # Quick-access TASTY Recipe Card generator (alternative placement near Schema Markup / RankMath)
+                with st.expander("🍫 Quick TASTY Recipe Card Generator", expanded=False):
+                    st.caption("Generate the pure JavaScript snippet to auto-fill a Tasty Recipe Card. This works even if Step 4 is hidden.")
+                    if st.button("Generate TASTY RECIPE CARD", key="generate_tasty_js_quick", use_container_width=True):
+                        try:
+                            rtxt = st.session_state.get("recipe_text", "")
+                            md = st.session_state.get("generated_md", "")
+                            recipe = None
+                            if rtxt.strip():
+                                recipe = parse_recipe_text_blocks(rtxt)
+                            if (not recipe or not (recipe.get("ingredients") or recipe.get("instructions"))) and md.strip():
+                                extracted = _extract_recipe_from_article_md(md)
+                                if extracted and (extracted.get("ingredients") or extracted.get("instructions")):
+                                    recipe = extracted
+                            if not recipe or not (recipe.get("ingredients") or recipe.get("instructions")):
+                                recipe = synthesize_recipe_from_context(
+                                    topic=st.session_state.get("topic", ""),
+                                    focus_keyword=st.session_state.get("focus_keyword", ""),
+                                    full_recipe_text=rtxt,
+                                    article_md=md
+                                )
+                            if recipe and (recipe.get("ingredients") or recipe.get("instructions")):
+                                recipe = _make_recipe_halal(recipe)
+                                st.session_state["js_recipe_card_quick"] = generate_js_recipe_card(recipe)
+                                st.success("JavaScript snippet generated below. Copy and paste it into your browser console on the Tasty Recipes edit page.")
+                            else:
+                                st.warning("No recipe detected from your inputs. Paste a recipe in 'Full Recipe' or ensure your article has a clear recipe section.")
+                        except Exception as e:
+                            st.error(f"Could not generate JS snippet: {e}")
+                    
+                    if st.session_state.get("js_recipe_card_quick"):
+                        st.text_area("Copy & Paste the JavaScript below", value=st.session_state["js_recipe_card_quick"], height=260, key="js_recipe_card_quick_textarea")
+                        st.download_button(
+                            "💾 Download JS file",
+                            data=st.session_state["js_recipe_card_quick"],
+                            file_name="tasty_recipe_fill.js",
+                            mime="text/javascript",
+                            use_container_width=True,
+                            key="download_js_quick"
+                        )
                 
                 # Character limit indicators
                 st.markdown("**📊 Character Limit Status:**")
@@ -2597,6 +3038,11 @@ Generated: {metadata.get('generated_at', 'N/A')}"""
                                              f"🖼️ **Images Uploaded:** {len(uploaded_images)}\n\n"
                                              f"📊 **Status:** {status.title()}")
                                     
+                                    # Persist publish state for Step 4 unlock
+                                    st.session_state["wp_post_published"] = True
+                                    st.session_state["wp_last_post"] = post
+                                    st.session_state["wp_last_post_link"] = post.get('link', '#')
+                                    
                                     # Show uploaded images summary
                                     with st.expander("📋 Uploaded Images Summary", expanded=False):
                                         for img_type, media_info in uploaded_media.items():
@@ -2722,8 +3168,25 @@ with col2:
                         
                         tasty_id = None
                         try:
-                            parsed_recipe = parse_recipe_text_blocks(recipe_text or "")
-                            if parsed_recipe.get("title"):
+                            parsed_recipe = None
+                            rtxt = recipe_text or ""
+                            if rtxt.strip():
+                                parsed_recipe = parse_recipe_text_blocks(rtxt)
+                            if (not parsed_recipe or not (parsed_recipe.get("ingredients") or parsed_recipe.get("instructions"))):
+                                md = st.session_state.get("generated_md", "")
+                                if md.strip():
+                                    extracted = _extract_recipe_from_article_md(md)
+                                    if extracted and (extracted.get("ingredients") or extracted.get("instructions")):
+                                        parsed_recipe = extracted
+                            if not parsed_recipe or not (parsed_recipe.get("ingredients") or parsed_recipe.get("instructions")):
+                                parsed_recipe = synthesize_recipe_from_context(
+                                    topic=st.session_state.get("topic",""),
+                                    focus_keyword=st.session_state.get("focus_keyword",""),
+                                    full_recipe_text=rtxt,
+                                    article_md=st.session_state.get("generated_md","")
+                                )
+                            if parsed_recipe and (parsed_recipe.get("ingredients") or parsed_recipe.get("instructions")):
+                                parsed_recipe = _make_recipe_halal(parsed_recipe)
                                 tasty_id = create_tasty_recipe_via_rest(site, user, app_pw, parsed_recipe)
                         except Exception:
                             tasty_id = None
@@ -2752,15 +3215,29 @@ with col2:
                         if tasty_id:
                             content_html += "\n\n" + embed_tasty_recipe_shortcode(tasty_id)
                         else:
-                            if recipe_text.strip():
-                                try:
-                                    parsed = parse_recipe_text_blocks(recipe_text)
-                                    
-                                    # Recipe image handling removed - no longer needed
-                                    
+                            try:
+                                rtxt = recipe_text or ""
+                                parsed = None
+                                if rtxt.strip():
+                                    parsed = parse_recipe_text_blocks(rtxt)
+                                if (not parsed or not (parsed.get("ingredients") or parsed.get("instructions"))):
+                                    md = st.session_state.get("generated_md", "")
+                                    if md.strip():
+                                        extracted = _extract_recipe_from_article_md(md)
+                                        if extracted and (extracted.get("ingredients") or extracted.get("instructions")):
+                                            parsed = extracted
+                                if not parsed or not (parsed.get("ingredients") or parsed.get("instructions")):
+                                    parsed = synthesize_recipe_from_context(
+                                        topic=st.session_state.get("topic",""),
+                                        focus_keyword=st.session_state.get("focus_keyword",""),
+                                        full_recipe_text=rtxt,
+                                        article_md=st.session_state.get("generated_md","")
+                                    )
+                                if parsed and (parsed.get("ingredients") or parsed.get("instructions")):
+                                    parsed = _make_recipe_halal(parsed)
                                     content_html += "\n\n" + html_recipe_fallback(parsed)
-                                except Exception:
-                                    pass
+                            except Exception:
+                                pass
 
                         # Step 4: Setup categories and tags
                         wp_status_text.text("🏷️ Setting up categories and tags...")
@@ -2802,12 +3279,188 @@ with col2:
                         time.sleep(1)
                         wp_progress_container.empty()
                         
+                        # Persist publish state for Step 4 unlock
+                        st.session_state["wp_post_published"] = True
+                        st.session_state["wp_last_post"] = post
+                        st.session_state["wp_last_post_link"] = post.get('link', '#')
+                        
                         st.success(f"🎉 WordPress post created successfully! [View Post]({post.get('link','#')})")
                         
                     except Exception as e:
                         wp_progress_container.empty()
                         st.error(f"❌ Publishing failed: {e}")
 
+# Step 4: JavaScript Tasty Recipe Card (unlocked after publishing)
+with col2:
+    st.divider()
+    with st.container():
+        st.markdown("🍫 **Step 4:** TASTY RECIPE CARD (Pure JavaScript Version)")
+        if not st.session_state.get("wp_post_published"):
+            st.info("Publish your article in Step 3 to unlock this step.")
+        else:
+            st.caption("Full Recipe is optional — we'll use it if provided, otherwise we'll extract from your article or synthesize a well-organized recipe card.")
+            if st.button("Generate TASTY RECIPE CARD", use_container_width=True):
+                rtxt = st.session_state.get("recipe_text", "")
+                try:
+                    recipe = None
+                    if rtxt.strip():
+                        recipe = parse_recipe_text_blocks(rtxt)
+                    if (not recipe or not (recipe.get("ingredients") or recipe.get("instructions"))):
+                        md = st.session_state.get("generated_md", "")
+                        if md.strip():
+                            extracted = _extract_recipe_from_article_md(md)
+                            if extracted and (extracted.get("ingredients") or extracted.get("instructions")):
+                                recipe = extracted
+                    if not recipe or not (recipe.get("ingredients") or recipe.get("instructions")):
+                        recipe = synthesize_recipe_from_context(
+                            topic=st.session_state.get("topic",""),
+                            focus_keyword=st.session_state.get("focus_keyword",""),
+                            full_recipe_text=rtxt,
+                            article_md=st.session_state.get("generated_md","")
+                        )
+                    if recipe and (recipe.get("ingredients") or recipe.get("instructions")):
+                        recipe = _make_recipe_halal(recipe)
+                        st.session_state["js_recipe_card"] = generate_js_recipe_card(recipe)
+                        st.success("JavaScript snippet generated below. Copy and paste it into your browser console.")
+                    else:
+                        st.warning("No recipe detected from your inputs. Paste a recipe in 'Full Recipe' or ensure your article has a clear recipe section.")
+                except Exception as e:
+                    st.error(f"Could not generate JS snippet: {e}")
+            if st.session_state.get("js_recipe_card"):
+                st.text_area("Copy & Paste the JavaScript below", value=st.session_state["js_recipe_card"], height=260, key="js_recipe_card_full_textarea")
+                st.download_button("💾 Download JS file", data=st.session_state["js_recipe_card"], file_name="tasty_recipe_fill.js", mime="text/javascript", use_container_width=True, key="download_js_full")
+                st.caption("Tip: Paste into your browser console on the Tasty Recipes edit page, then press Enter. This fills all fields including description, ingredients, instructions, notes, times, yield, tags, and nutrition.")
+
 # Gentle nudge for auto-post (explicit click keeps control clear)
+def _normalize_recipe_for_tasty(recipe: dict, author_name: str = None) -> dict:
+    try:
+        out = dict(recipe or {})
+    except Exception:
+        out = {}
+    # Title and author
+    out["title"] = (
+        out.get("title")
+        or st.session_state.get("seo_title")
+        or st.session_state.get("focus_keyword")
+        or "Untitled Recipe"
+    )
+    if author_name:
+        out["author"] = author_name
+    else:
+        out["author"] = out.get("author") or st.session_state.get("author_name") or ""
+
+    # Description
+    out["description"] = out.get("description") or ""
+
+    # Normalize list-like fields
+    def ensure_list(x):
+        if x is None:
+            return []
+        if isinstance(x, (list, tuple)):
+            return [str(i).strip() for i in x if str(i).strip()]
+        if isinstance(x, str):
+            return [s.strip("•- \t") for s in x.splitlines() if s.strip()]
+        try:
+            return [str(x).strip()]
+        except Exception:
+            return []
+
+    out["ingredients"] = ensure_list(out.get("ingredients"))
+    out["instructions"] = ensure_list(out.get("instructions"))
+
+    notes = out.get("notes")
+    if isinstance(notes, (list, tuple)):
+        out["notes"] = "\n".join(str(n).strip() for n in notes if str(n).strip())
+    else:
+        out["notes"] = notes or ""
+
+    # Details fields with safe defaults
+    for key in [
+        "prep_time",
+        "cook_time",
+        "total_time",
+        "yield",
+        "category",
+        "method",
+        "cuisine",
+        "diet",
+        "keywords",
+        "serving_size",
+    ]:
+        if out.get(key) is None:
+            out[key] = ""
+
+    # Normalize keywords to comma string
+    if isinstance(out.get("keywords"), (list, tuple)):
+        out["keywords"] = ", ".join([str(k).strip() for k in out["keywords"] if str(k).strip()])
+
+    # Normalize nutrition with aliases and mirror to top-level keys
+    nut = out.get("nutrition") or {}
+    aliases = {
+        "calories": ["calories", "kcal"],
+        "sugar": ["sugar", "sugars"],
+        "sodium": ["sodium", "salt"],
+        "fat": ["fat", "total_fat"],
+        "saturated_fat": ["saturated_fat", "saturated"],
+        "unsaturated_fat": [
+            "unsaturated_fat",
+            "unsaturated",
+            "polyunsaturated_fat",
+            "monounsaturated_fat",
+        ],
+        "trans_fat": ["trans_fat", "trans"],
+        "carbohydrates": ["carbohydrates", "carbs", "total_carbohydrates"],
+        "fiber": ["fiber", "dietary_fiber"],
+        "protein": ["protein", "proteins"],
+        "cholesterol": ["cholesterol"],
+    }
+    norm_nut = {}
+    for k, alts in aliases.items():
+        val = out.get(k)
+        if not val:
+            val = nut.get(k)
+        if not val:
+            for a in alts:
+                if out.get(a):
+                    val = out.get(a)
+                    break
+                if nut.get(a):
+                    val = nut.get(a)
+                    break
+        norm_nut[k] = val or ""
+    out["nutrition"] = norm_nut
+    out.update(norm_nut)
+
+    return out
+
+
+st.divider()
+with st.container():
+    st.markdown("🚀 **Step 5:** AI-Generated TASTY RECIPE CARD (Pure JavaScript)")
+    st.caption("This step sends your article and optional 'Full Recipe (parsed for Tasty + fallback)' to GPT to synthesize a well-organized recipe tailored for the WP Tasty plugin. It does not copy your raw text verbatim; it restructures and cleans it specifically for the card.")
+    if st.button("Generate via GPT (Best for Tasty)", use_container_width=True, key="generate_tasty_js_ai"):
+        try:
+            rtxt = st.session_state.get("recipe_text", "")
+            md = st.session_state.get("generated_md", "")
+            recipe = synthesize_recipe_from_context(
+                topic=st.session_state.get("topic", ""),
+                focus_keyword=st.session_state.get("focus_keyword", ""),
+                full_recipe_text=rtxt,
+                article_md=md
+            )
+            if recipe and (recipe.get("ingredients") or recipe.get("instructions")):
+                recipe = _make_recipe_halal(recipe)
+                st.session_state["js_recipe_card_ai"] = generate_js_recipe_card(recipe)
+                st.success("AI-generated JavaScript snippet ready below. Paste it into your browser console on the Tasty Recipes edit page.")
+            else:
+                st.warning("AI could not synthesize a recipe from your inputs. Please ensure your article includes recipe details or provide them in 'Full Recipe'.")
+        except Exception as e:
+            st.error(f"Could not generate AI JS snippet: {e}")
+
+    if st.session_state.get("js_recipe_card_ai"):
+        st.text_area("Copy & Paste the JavaScript below (AI)", value=st.session_state["js_recipe_card_ai"], height=260, key="js_recipe_card_ai_textarea")
+        st.download_button("💾 Download AI JS file", data=st.session_state["js_recipe_card_ai"], file_name="tasty_recipe_fill_ai.js", mime="text/javascript", use_container_width=True, key="download_js_ai")
+        st.caption("Tip: Paste into your browser console on the Tasty Recipes edit page, then press Enter. This fills description, ingredients, instructions, notes, times, yield, tags, and nutrition.")
+
 if st.session_state.get("auto_post") and st.session_state.get("generated_md"):
     st.info("Auto-post is enabled. Click 'Post to WordPress' to publish the current draft.")
