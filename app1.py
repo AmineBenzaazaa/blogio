@@ -15,262 +15,8 @@ import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
-
-# -----------------------------
-# Recipe JSON-LD helpers (no fabricated values)
-# -----------------------------
-def _normalize_list_for_schema(value):
-    import re
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(x).strip() for x in value if isinstance(x, (str,int,float)) and str(x).strip()]
-    if isinstance(value, str):
-        items = [ln.strip() for ln in value.splitlines() if ln.strip()]
-        items = [re.sub(r'^\s*[\-\u2022\*]?\s*', '', it) for it in items]
-        items = [re.sub(r'^\s*\d+[\)\.\-\s]*', '', it) for it in items]
-        return [it.strip() for it in items if it.strip()]
-    return []
-
-def _to_iso8601_duration(value):
-    import re
-    if not value and value != 0:
-        return None
-    if isinstance(value, (int, float)):
-        return f"PT{int(value)}M"
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return None
-        if s.upper().startswith("PT"):
-            return s.upper()
-        low = s.lower()
-        matches = re.findall(r'(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m)\b', low)
-        if matches:
-            h = m = 0
-            for num, unit in matches:
-                n = int(num)
-                if unit.startswith('h'):
-                    h += n
-                else:
-                    m += n
-            if h and m: return f"PT{h}H{m}M"
-            if h: return f"PT{h}H"
-            if m: return f"PT{m}M"
-            return None
-        if low.isdigit():
-            return f"PT{int(low)}M"
-    return None
-
-def _sum_durations_iso8601(durations):
-    """Sum ISO8601 or parseable durations into a single ISO8601 string (minutes granularity)."""
-    total_m = 0
-    for d in durations:
-        if not d: 
-            continue
-        iso = _to_iso8601_duration(d)
-        if not iso: 
-            continue
-        h = m = 0
-        mobj = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?$', iso, flags=re.I)
-        if mobj:
-            h = int(mobj.group(1) or 0)
-            m = int(mobj.group(2) or 0)
-            total_m += h*60 + m
-    if total_m <= 0:
-        return None
-    H = total_m // 60
-    M = total_m % 60
-    if H and M: return f"PT{H}H{M}M"
-    if H: return f"PT{H}H"
-    return f"PT{M}M"
-
-def build_recipe_json_ld(metadata: dict, site_url: str = "https://tastetorate.com/") -> dict:
-    m = metadata or {}
-    schema = {"@context": "https://schema.org", "@type": "Recipe"}
-    se = m.get("schema_elements") or {}
-
-    def _first(*keys):
-        for k in keys:
-            v = se.get(k) if isinstance(se, dict) and k in se else m.get(k)
-            if v: return v
-        return None
-
-    # Identity
-    name = _first("name", "recipe_name", "title")
-    if name: schema["name"] = name
-    desc = _first("description", "recipe_description", "description")
-    if desc: schema["description"] = desc
-
-    # Images
-    images_collected = []
-    for key in ("image", "images", "featured_image", "cover_image", "image_url", "featured_image_url"):
-        v = _first(key)
-        if isinstance(v, str) and v.strip():
-            images_collected.append(v.strip())
-        elif isinstance(v, list):
-            for item in v:
-                if isinstance(item, str) and item.strip():
-                    images_collected.append(item.strip())
-                elif isinstance(item, dict) and item.get("url"):
-                    io = {"@type":"ImageObject","url":item.get("url")}
-                    if item.get("width"): io["width"] = item.get("width")
-                    if item.get("height"): io["height"] = item.get("height")
-                    images_collected.append(io)
-        elif isinstance(v, dict) and v.get("url"):
-            io = {"@type":"ImageObject","url":v.get("url")}
-            if v.get("width"): io["width"] = v.get("width")
-            if v.get("height"): io["height"] = v.get("height")
-            images_collected.append(io)
-    if images_collected:
-        schema["image"] = images_collected if len(images_collected) > 1 else images_collected[0]
-
-    # Author / Publisher
-    author = _first("author", "author_name")
-    if isinstance(author, dict) and author.get("name"):
-        schema["author"] = {"@type": author.get("@type","Person"), "name": author.get("name")}
-    elif isinstance(author, str):
-        schema["author"] = {"@type": "Person", "name": author}
-
-    publisher = _first("publisher")
-    if isinstance(publisher, dict) and publisher.get("name"):
-        pub = {"@type": publisher.get("@type","Organization"), "name": publisher.get("name")}
-        logo = publisher.get("logo")
-        if logo: pub["logo"] = logo
-        schema["publisher"] = pub
-
-    # Taxonomy
-    rc = _first("recipeCategory", "category")
-    if rc: schema["recipeCategory"] = rc
-    rcu = _first("recipeCuisine", "cuisine")
-    if rcu: schema["recipeCuisine"] = rcu
-    kws = _first("keywords", "tags")
-    if isinstance(kws, list): kws = ", ".join([str(x).strip() for x in kws if str(x).strip()])
-    if isinstance(kws, str) and kws.strip(): schema["keywords"] = kws.strip()
-    diet = _first("suitableForDiet", "diet")
-    if diet: schema["suitableForDiet"] = diet
-
-    # Yield / Servings
-    ry = _first("recipeYield", "yield", "yields", "servings", "serves")
-    if ry: schema["recipeYield"] = str(ry)
-
-    # Durations
-    prep = _to_iso8601_duration(_first("prepTime","prep_time","preparation_time"))
-    cook = _to_iso8601_duration(_first("cookTime","cook_time"))
-    rest = _to_iso8601_duration(_first("rest_time","chill_time","inactive_time"))
-    total = _to_iso8601_duration(_first("totalTime","total_time"))
-    if not total:
-        total = _sum_durations_iso8601([prep, cook, rest])
-    if prep: schema["prepTime"] = prep
-    if cook: schema["cookTime"] = cook
-    if total: schema["totalTime"] = total
-
-    # Ingredients
-    ingredients = _first("recipeIngredient","ingredients","ingredient_list")
-    ing_list = _normalize_list_for_schema(ingredients)
-    if ing_list: schema["recipeIngredient"] = ing_list
-
-    # Instructions
-    sections = _first("instruction_sections","recipeInstructionSections","instructions_sections")
-    if isinstance(sections, list) and sections:
-        howto_sections = []
-        for sec in sections:
-            name_s = steps = None
-            if isinstance(sec, dict):
-                name_s = sec.get("name") or sec.get("title")
-                steps = _normalize_list_for_schema(sec.get("steps") or sec.get("instructions"))
-            else:
-                steps = _normalize_list_for_schema(sec)
-            if steps:
-                howto_sections.append({
-                    "@type":"HowToSection",
-                    **({"name": name_s} if name_s else {}),
-                    "itemListElement":[{"@type":"HowToStep","text": s} for s in steps]
-                })
-        if howto_sections:
-            schema["recipeInstructions"] = howto_sections
-    else:
-        steps = _normalize_list_for_schema(_first("recipeInstructions","instructions"))
-        if steps:
-            schema["recipeInstructions"] = [{"@type":"HowToStep","text": s} for s in steps]
-
-    # Tools / Supplies
-    tools = _first("tools","tool","equipment","recipeTools","recipeEquipment")
-    if tools:
-        tl = tools if isinstance(tools, list) else _normalize_list_for_schema(tools)
-        tl = [t for t in tl if str(t).strip()]
-        if tl:
-            schema["tool"] = [{"@type":"HowToTool","name": str(t)} for t in tl]
-
-    supplies = _first("supplies","supply","recipeSupplies")
-    if supplies:
-        sp = supplies if isinstance(supplies, list) else _normalize_list_for_schema(supplies)
-        sp = [s for s in sp if str(s).strip()]
-        if sp:
-            schema["supply"] = [{"@type":"HowToSupply","name": str(s)} for s in sp]
-
-    # Nutrition
-    nutrition = _first("nutrition","nutrition_facts")
-    if isinstance(nutrition, dict):
-        ni = {"@type":"NutritionInformation"}
-        for key in [
-            "calories","fatContent","saturatedFatContent","unsaturatedFatContent",
-            "transFatContent","cholesterolContent","sodiumContent","carbohydrateContent",
-            "fiberContent","sugarContent","proteinContent","servingSize"
-        ]:
-            v = nutrition.get(key)
-            if v is not None and str(v).strip():
-                ni[key] = v
-        if len(ni) > 1:
-            schema["nutrition"] = ni
-
-    # Ratings / Reviews
-    ar = _first("aggregateRating")
-    if isinstance(ar, dict) and ("ratingValue" in ar or "ratingCount" in ar or "reviewCount" in ar):
-        schema["aggregateRating"] = ar
-    reviews = _first("review","reviews")
-    if isinstance(reviews, list) and reviews:
-        valid = []
-        for rv in reviews:
-            if isinstance(rv, dict):
-                ro = {"@type":"Review"}
-                for k in ["author","datePublished","reviewBody","name"]:
-                    v = rv.get(k)
-                    if v: ro[k] = v
-                rr = rv.get("reviewRating")
-                if isinstance(rr, dict) and rr.get("ratingValue"):
-                    ro["reviewRating"] = {"@type":"Rating","ratingValue": rr.get("ratingValue")}
-                if len(ro) > 1:
-                    valid.append(ro)
-        if valid:
-            schema["review"] = valid
-
-    # Video
-    video = _first("video","videoObject")
-    if isinstance(video, dict) and (video.get("url") or video.get("embedUrl")):
-        vo = {"@type":"VideoObject"}
-        for k in ["name","description","uploadDate","duration","thumbnailUrl","contentUrl","embedUrl","url"]:
-            v = video.get(k)
-            if v: vo[k] = v
-        if vo.get("duration"):
-            norm = _to_iso8601_duration(vo["duration"])
-            if norm: vo["duration"] = norm
-        schema["video"] = vo
-
-    # URL / mainEntityOfPage
-    permalink = _first("permalink","url","slug")
-    if isinstance(permalink, str) and permalink.strip():
-        page_url = permalink if permalink.startswith("http") else site_url.rstrip("/") + "/" + permalink.lstrip("/")
-        schema["mainEntityOfPage"] = {"@type":"WebPage","@id": page_url}
-
-    return schema
-
-
-# ---- safe metadata init ----
-if 'metadata' not in globals():
-    metadata = {}
-
 import streamlit as st
+import streamlit.components.v1 as components
 from openai import OpenAI
 
 # Networking for WordPress
@@ -291,6 +37,28 @@ try:
     import markdown as mdlib  # pip install markdown
 except Exception:
     mdlib = None
+
+
+def md_to_html(text: str) -> str:
+    """Convert Markdown text to HTML using python-markdown if available, otherwise a basic regex fallback."""
+    if mdlib:
+        try:
+            return mdlib.markdown(text)
+        except Exception:
+            pass
+    # Fallback: basic markdown to HTML conversion
+    html = text
+    # Convert headings
+    html = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
+    html = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
+    html = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html, flags=re.MULTILINE)
+    # Convert bold text
+    html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html)
+    # Convert double line breaks to paragraphs
+    html = re.sub(r'\n\n+', '</p><p>', html)
+    html = f'<p>{html}</p>'
+    html = html.replace('<p></p>', '')
+    return html
 
 # ---------------------------------------------------------
 # Settings persistence
@@ -313,7 +81,7 @@ def save_current_settings():
     try:
         keys = [
             # auth
-            "API_KEY",
+            "OPENAI_API_KEY",
 
             # social + CTA
             "fb_url","pin_url","append_cta",
@@ -347,13 +115,13 @@ load_settings_into_session()
 # OpenAI client
 # ---------------------------------------------------------
 def get_client():
-    key = st.session_state.get("API_KEY") or os.getenv("API_KEY")
+    key = st.session_state.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not key:
         try:
-            st.sidebar.error("Please enter your API Key in the sidebar.")
+            st.sidebar.error("Please enter your OpenAI API key in the sidebar.")
         except Exception:
             pass
-        raise RuntimeError("API_KEY missing")
+        raise RuntimeError("OPENAI_API_KEY missing")
     return OpenAI(api_key=key)
 
 # ---------------------------------------------------------
@@ -707,6 +475,24 @@ def parse_recipe_text_blocks(recipe_text: str) -> Dict[str, Any]:
             m = re.search(r'(\d+)', ln)
             if m:
                 servings = f"{m.group(1)} servings"
+        elif L.startswith("category:"):
+            category = ln.split(":",1)[-1].strip()
+        elif L.startswith("method:"):
+            method = ln.split(":",1)[-1].strip()
+        elif L.startswith("cuisine:"):
+            cuisine = ln.split(":",1)[-1].strip()
+        elif L.startswith("diet:"):
+            diet_line = ln.split(":",1)[-1].strip()
+            if diet_line:
+                # Store diet in keywords for now; generator has a dedicated diet field, but parser keeps simple structure
+                keywords.append(diet_line)
+        elif L.startswith("keywords:"):
+            kws = ln.split(":",1)[-1].strip()
+            if kws:
+                for kw in re.split(r"[,;]", kws):
+                    k = kw.strip()
+                    if k and k.lower() not in [x.lower() for x in keywords]:
+                        keywords.append(k)
 
     section = None
     for ln in lines:
@@ -877,87 +663,156 @@ def _extract_recipe_from_article_md(md: str) -> Dict[str, Any]:
 def generate_js_recipe_card(recipe: Dict[str, Any]) -> str:
     """Generate pure JavaScript fillRecipeForm() function for Tasty Recipe CPT integration."""
     import json
-
+    
     def js_escape(text: str) -> str:
+        """Escape text for JavaScript string literal."""
         if not text:
             return ""
-        return (
-            text.replace("\\", "\\\\")
-                .replace("'", "\\'")
-                .replace("\n", "\\n")
-                .replace("\r", "")
-        )
-
+        return text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "")
+    
     def format_list_for_js(items: List[str], formatter: str = "p") -> str:
+        """Format list items for JavaScript template literal."""
         if not items:
             return ""
         escaped_items = [js_escape(item) for item in items]
-        # The JS helpers (p/n) will wrap/number them in the editor:
+        # Return plain newline-separated items; the JS p()/n() helpers will wrap/number them in the editor.
         return "\\n".join(escaped_items)
-
-    # Rich-text fields
+    
+    # Extract and format recipe data
+    # Title/Author with safe defaults from session state if available
+    try:
+        _seo_title = st.session_state.get("seo_title")
+        _focus_kw = st.session_state.get("focus_keyword")
+        _author_name = st.session_state.get("author_name")
+    except Exception:
+        _seo_title = _focus_kw = _author_name = ""
+    title = js_escape(recipe.get("title") or _seo_title or _focus_kw or "")
+    author = js_escape(recipe.get("author") or _author_name or "")
+    
     description = js_escape(recipe.get("description", ""))
     ingredients = format_list_for_js(recipe.get("ingredients", []), "p")
     instructions = format_list_for_js(recipe.get("instructions", []), "n")
     notes = format_list_for_js(recipe.get("notes", []), "p")
-
-    # Title/Author/Servings
-    title = js_escape(recipe.get("title", ""))
-    author = js_escape(recipe.get("author", ""))
-    servings_value = js_escape(str(recipe.get("servings", "") or ""))
-
-    # ISO -> minutes for details
-    def iso_to_minutes(iso_time: str) -> str:
-        if not iso_time:
+    
+    # Extract times and convert from ISO to minutes (accept plain minutes too)
+    def iso_to_minutes(iso_time) -> str:
+        """Convert PT15M or PT1H30M to minutes; accept numeric/int or numeric string as minutes."""
+        if iso_time is None:
             return ""
-        import re as _re
-        h = _re.search(r"(\d+)\s*H", iso_time, _re.I)
-        m = _re.search(r"(\d+)\s*M", iso_time, _re.I)
-        total = 0
-        if h: total += int(h.group(1)) * 60
-        if m: total += int(m.group(1))
-        return str(total) if total else ""
-
-    prep_time = iso_to_minutes(recipe.get("prepISO", ""))
-    cook_time = iso_to_minutes(recipe.get("cookISO", ""))
-    total_time = iso_to_minutes(recipe.get("totalISO", ""))
-    additional_time = iso_to_minutes(
-        recipe.get("additionalISO") or recipe.get("restISO") or recipe.get("inactiveISO") or ""
-    )
-
-    # If total is missing, compute from parts
-    if not total_time:
-        mins = 0
-        for t in (prep_time, cook_time, additional_time):
-            try:
-                mins += int(t) if t else 0
-            except Exception:
-                pass
-        total_time = str(mins) if mins else ""
-
-    # Other detail fields
+        try:
+            import re
+            if isinstance(iso_time, (int, float)):
+                return str(int(iso_time))
+            s = str(iso_time).strip()
+            if not s:
+                return ""
+            if re.fullmatch(r"\d+", s):
+                return s
+            hours = re.search(r"(\d+)H", s)
+            minutes = re.search(r"(\d+)M", s)
+            total_minutes = 0
+            if hours:
+                total_minutes += int(hours.group(1)) * 60
+            if minutes:
+                total_minutes += int(minutes.group(1))
+            return str(total_minutes) if total_minutes > 0 else ""
+        except Exception:
+            return ""
+    
+    # Prefer ISO fields, but also accept already-minutes fields if present
+    prep_time = iso_to_minutes(recipe.get("prepISO", "") or recipe.get("prep_time", ""))
+    cook_time = iso_to_minutes(recipe.get("cookISO", "") or recipe.get("cook_time", ""))
+    total_time = iso_to_minutes(recipe.get("totalISO", "") or recipe.get("total_time", ""))
+    
+    # Extract other fields
     yield_value = js_escape(recipe.get("yield", ""))
     category = js_escape(recipe.get("category", ""))
     method = js_escape(recipe.get("method", ""))
     cuisine = js_escape(recipe.get("cuisine", ""))
+    # Keywords: support list or comma-separated string
+    kw_raw = recipe.get("keywords") or []
+    if isinstance(kw_raw, list):
+        keywords = js_escape(", ".join(kw_raw))
+    else:
+        keywords = js_escape(str(kw_raw))
     diet = js_escape(recipe.get("diet", ""))
-    keywords = js_escape(", ".join(recipe.get("keywords", [])))
+    
+    # Nutrition fields (support common key variants)
+    nutrition = recipe.get("nutrition") or {}
+    def nv(key: str, fallback_key: Optional[str] = None) -> str:
+        v = nutrition.get(key)
+        if (not v) and fallback_key:
+            v = nutrition.get(fallback_key)
+        return js_escape(str(v)) if v else ""
+    serving_size = nv("Serving Size", "serving_size")
+    calories = nv("Calories", "calories")
+    sugar = nv("Sugar", "sugar")
+    sodium = nv("Sodium", "sodium")
+    fat = nv("Total Fat", "Fat")
+    saturated_fat = nv("Saturated Fat", "saturated_fat")
+    unsaturated_fat = nv("Unsaturated Fat", "unsaturated_fat")
+    trans_fat = nv("Trans Fat", "trans_fat")
+    cholesterol = nv("Cholesterol", "cholesterol")
+    carbohydrates = nv("Total Carbohydrates", "Carbohydrates")
+    fiber = nv("Dietary Fiber", "Fiber")
+    protein = nv("Protein", "protein")
+    
+    # Apply minimal derivations; avoid fabricating defaults
+    # Derive total_time if missing by summing provided prep and cook times
+    try:
+        pt_int = int(prep_time) if (prep_time and prep_time.isdigit()) else 0
+        ct_int = int(cook_time) if (cook_time and cook_time.isdigit()) else 0
+    except Exception:
+        pt_int, ct_int = 0, 0
+    if (not total_time or not total_time.isdigit()) and (pt_int or ct_int):
+        total_time = str(pt_int + ct_int)
+    # If still no prep_time but total_time present (and no cook time), use total as prep
+    if (not prep_time) and (total_time and total_time.isdigit()) and (not cook_time or not cook_time.isdigit()):
+        prep_time = total_time
 
-    # Nutrition (accept normalized keys)
-    nutrition = recipe.get("nutrition", {}) or {}
-    serving_size = js_escape(nutrition.get("Serving Size", "") or recipe.get("serving_size", ""))
-    calories = js_escape(nutrition.get("Calories", "") or recipe.get("calories", ""))
-    sugar = js_escape(nutrition.get("Sugar", "") or recipe.get("sugar", ""))
-    sodium = js_escape(nutrition.get("Sodium", "") or recipe.get("sodium", ""))
-    fat = js_escape(nutrition.get("Total Fat", "") or recipe.get("fat", ""))
-    saturated_fat = js_escape(nutrition.get("Saturated Fat", "") or recipe.get("saturated_fat", ""))
-    unsaturated_fat = js_escape(nutrition.get("Unsaturated Fat", "") or recipe.get("unsaturated_fat", ""))
-    trans_fat = js_escape(nutrition.get("Trans Fat", "") or recipe.get("trans_fat", ""))
-    cholesterol = js_escape(nutrition.get("Cholesterol", "") or recipe.get("cholesterol", ""))
-    carbohydrates = js_escape(nutrition.get("Carbohydrates", "") or recipe.get("carbohydrates", ""))
-    fiber = js_escape(nutrition.get("Fiber", "") or recipe.get("fiber", ""))
-    protein = js_escape(nutrition.get("Protein", "") or recipe.get("protein", ""))
+    # Yield: only use explicit values from recipe; do not fabricate defaults
+    if not yield_value:
+        y = recipe.get("yield", "") or recipe.get("servings", "")
+        yield_value = js_escape(y)
 
+    # Category: do not infer; leave blank if not provided
+    title_txt = (recipe.get("title", "") or "")
+    title_l = title_txt.lower()
+    kw_list = recipe.get("keywords", []) or []
+    hay = (" ".join(kw_list) + " " + title_l).strip()
+    if not category:
+        pass
+
+    # Method: leave blank if not provided
+    # (no default)
+
+    # Cuisine: leave blank if not provided
+    # (no default)
+
+    # Keywords: leave blank if not provided
+    # (no inference from title)
+
+    # Diet: leave blank if not provided
+    # (no default)
+
+    # Nutrition: use only values from context; do not fabricate defaults
+    # Leave serving_size, calories, sugar, sodium, fat, saturated_fat, unsaturated_fat,
+    # trans_fat, cholesterol, carbohydrates, fiber, protein as-is.
+
+    # Final pass: derive times when supported by provided values; do not force zeros
+    try:
+        _pt = int(prep_time) if (prep_time and prep_time.isdigit()) else None
+        _ct = int(cook_time) if (cook_time and cook_time.isdigit()) else None
+        _tt = int(total_time) if (total_time and total_time.isdigit()) else None
+    except Exception:
+        _pt = _ct = _tt = None
+    if (_tt is None) and ((_pt is not None) or (_ct is not None)):
+        total_time = str(((_pt or 0) + (_ct or 0))) if ((_pt or 0) + (_ct or 0)) > 0 else ""
+    if (not cook_time) and (_tt is not None) and (_pt is not None) and (_tt - _pt >= 0):
+        cook_time = str(_tt - _pt)
+    # Do not set prep_time/cook_time/total_time to '0' when unknown
+
+    # Generate the JavaScript function
     js_code = f"""function fillRecipeForm() {{
 const f=(s,v)=>document.querySelector(s)&&(document.querySelector(s).value=v),
 p=t=>t.split('\\n').map(x=>`<p>${{x}}</p>`).join(''),
@@ -968,53 +823,41 @@ ingredients:p('{ingredients}'),
 instructions:n('{instructions}'),
 notes:p('{notes}')
 }};
-
-// 1) Fill the WYSIWYG fields (Tasty uses TinyMCE editors with these IDs)
-for (const k in g) {{
-  const ed = window.tinyMCE?.get(`tasty-recipes-recipe-${{k}}`);
-  ed && ed.setContent(g[k]);
+for(const k in g){{
+const ed=window.tinyMCE?.get(`tasty-recipes-recipe-${{k}}`);
+ed&&ed.setContent(g[k]);
 }}
-
-// 2) Title (Gutenberg or Classic) and Author Name
-f('textarea.editor-post-title__input, #title, input[name="post_title"]','{title}');
-['input[name="author_name"]','#tasty-recipes-author-name','input[name="author"]']
-  .forEach(sel => f(sel,'{author}'));
-
-// 3) Details fields (accepts both presence/absence of inputs)
-[
- "prep_time","cook_time","additional_time","total_time","yield",
- "servings","category","method","cuisine","diet","keywords",
- "serving_size","calories","sugar","sodium","fat","saturated_fat","unsaturated_fat",
- "trans_fat","cholesterol","carbohydrates","fiber","protein"
-].forEach(k => f(`[name="${{k}}"]`, {{
-  prep_time:'{prep_time}',
-  cook_time:'{cook_time}',
-  additional_time:'{additional_time}',
-  total_time:'{total_time}',
-  yield:'{yield_value}',
-  servings:'{servings_value}',
-  category:'{category}',
-  method:'{method}',
-  cuisine:'{cuisine}',
-  diet:'{diet}',
-  keywords:'{keywords}',
-  serving_size:'{serving_size}',
-  calories:'{calories}',
-  sugar:'{sugar}',
-  sodium:'{sodium}',
-  fat:'{fat}',
-  saturated_fat:'{saturated_fat}',
-  unsaturated_fat:'{unsaturated_fat}',
-  trans_fat:'{trans_fat}',
-  cholesterol:'{cholesterol}',
-  carbohydrates:'{carbohydrates}',
-  fiber:'{fiber}',
-  protein:'{protein}'
-}}[k] ));
+["prep_time","cook_time","total_time","yield","category","method","cuisine","keywords","diet",
+"serving_size","calories","sugar","sodium","fat","saturated_fat","unsaturated_fat","trans_fat",
+"cholesterol","carbohydrates","fiber","protein"
+].forEach(k=>f(`[name="${{k}}"]`,{{
+prep_time:'{prep_time}',
+cook_time:'{cook_time}',
+total_time:'{total_time}',
+yield:'{yield_value}',
+category:'{category}',
+method:'{method}',
+cuisine:'{cuisine}',
+keywords:'{keywords}',
+diet:'{diet}',
+serving_size:'{serving_size}',
+calories:'{calories}',
+sugar:'{sugar}',
+sodium:'{sodium}',
+fat:'{fat}',
+saturated_fat:'{saturated_fat}',
+unsaturated_fat:'{unsaturated_fat}',
+trans_fat:'{trans_fat}',
+cholesterol:'{cholesterol}',
+carbohydrates:'{carbohydrates}',
+fiber:'{fiber}',
+protein:'{protein}'
+}}[k]));
 }}
 fillRecipeForm();"""
-
+    
     return js_code
+
 def synthesize_recipe_from_context(
     topic: str = "",
     focus_keyword: str = "",
@@ -1025,54 +868,31 @@ def synthesize_recipe_from_context(
 ) -> Dict[str, Any]:
     """
     Use the LLM to synthesize a well-organized recipe text from context, then parse it
-    with parse_recipe_text_blocks. Returns {} on failure.
-
-    Improvements:
-    - Adds "Additional time" to the target format (rest/chill/inactive).
-    - Expands Nutrition to a richer, parser-friendly set.
-    - Clips context to keep requests reliable.
-    - Validates output; retries once with a stricter prompt if fields are missing.
+    with parse_recipe_text_blocks. Uses the "Full Recipe (parsed for Tasty + fallback)"
+    as inspiration when provided; otherwise falls back to the generated article content.
+    Returns an empty dict on failure.
     """
     try:
         mdl = model or st.session_state.get("model_name", "gpt-4.1")
-        # keep temperature in a sane range
-        t_default = st.session_state.get("temperature", 0.6)
-        try:
-            t_val = float(temperature if temperature is not None else t_default)
-        except Exception:
-            t_val = float(t_default)
-        temp = min(max(t_val, 0.0), 1.2)
+        temp = float(temperature if temperature is not None else st.session_state.get("temperature", 0.2))
 
-        # ---- Build safe context ----
-        # Keep total prompt size modest to avoid truncation/latency.
-        CLIP = 6000
         context_bits: List[str] = []
         if full_recipe_text and full_recipe_text.strip():
-            context_bits.append("Full Recipe text provided by user:\n" + full_recipe_text.strip()[:CLIP])
+            context_bits.append("Full Recipe text provided by user:\n" + full_recipe_text.strip()[:5000])
         if article_md and article_md.strip():
-            context_bits.append("Article content (markdown):\n" + article_md.strip()[:CLIP])
+            context_bits.append("Article content (markdown):\n" + article_md.strip()[:5000])
         context = "\n\n".join(context_bits) or "No explicit recipe text was provided."
 
-        def base_prompt(strict: bool = False) -> str:
-            # When strict=True we add stronger constraints and reminders.
-            strict_rules = """
-- Output must include every section and field shown above, in the exact order.
-- If any detail is unknown, produce a reasonable, generic but coherent value (do not leave blank).
-- No prose, no storytelling, no brand/personal voice; only the required fields and lines.
-- Avoid special characters and emojis.
-            """.strip()
-
-            return f"""
-From the context below, synthesize a single, clean, well-organized recipe in PLAIN TEXT using EXACTLY this format so a simple parser can read it:
+        prompt = f"""
+From the context below, synthesize a single, clean, well-organized recipe in PLAIN TEXT using EXACTLY this format so a simple parser can read it. Only include lines that are supported by the context:
 
 Title on the first line
 Optional short description on the second line
-Prep time: <number> m or h m
-Cook time: <number> m or h m
-Additional time: <number> m or h m
-Total time: <number> m or h m
-Yield: <e.g., 4 servings or 1 loaf>
-Servings: <e.g., 4 servings>
+[Optional if present] Prep time: <number> m or h m
+[Optional if present] Cook time: <number> m or h m
+[Optional if present] Total time: <number> m or h m
+[Optional if present] Yield: <e.g., 4 servings or 1 loaf>
+[Optional if present] Servings: <e.g., 4 servings>
 
 Ingredients
 - item 1
@@ -1084,32 +904,25 @@ Instructions
 2. step 2
 3. ...
 
-Notes
+[Optional if present] Notes
 - note line 1
 - note line 2
 
-Nutrition
-Serving Size: <value>
+[Optional if present] Nutrition
 Calories: <value>
-Sugar: <value>
-Sodium: <value>
-Total Fat: <value>
-Saturated Fat: <value>
-Unsaturated Fat: <value>
-Trans Fat: <value>
-Cholesterol: <value>
 Carbohydrates: <value>
-Fiber: <value>
 Protein: <value>
+Fat: <value>
+Sodium: <value>
 
 Rules:
-- Use US measurements and realistic amounts.
-- Base details on the provided context faithfully; do not invent exotic, specific brand details.
+- Use only information present in the provided context; do not invent or guess any details not supported by the context.
+- If the context is insufficient to produce a specific, truthful recipe with concrete ingredients and steps, respond with the single word INSUFFICIENT.
+- Use US measurements where present in the context; do not convert or infer amounts that are not stated.
 - Avoid any code fences, Markdown headings (#), or extra labeling not shown in the format.
+- Include time, yield/servings, and nutrition lines ONLY if the context explicitly provides them; otherwise omit those lines entirely.
 - Keep the title concise and descriptive.
 - Keep ingredient lines one per line; keep steps concise but precise.
-{"- Keep step count practical (6–12 steps) and avoid fluff." if strict else ""}
-{"- Absolutely no additional sections or lines beyond the exact format." if strict else ""}
 
 Context:
 Topic: {topic}
@@ -1118,40 +931,13 @@ Focus keyword: {focus_keyword}
 {context}
 """.strip()
 
-        def is_valid(parsed: Dict[str, Any]) -> bool:
-            """Basic sanity checks so we retry only when it's clearly malformed."""
-            if not parsed:
-                return False
-            if not (parsed.get("ingredients") and parsed.get("instructions")):
-                return False
-            # times: accept if we have at least prep or cook; prefer total present
-            has_any_time = any(parsed.get(k) for k in ("prepISO", "cookISO", "totalISO"))
-            if not has_any_time:
-                return False
-            # nutrition: check a few key fields (calories + macros)
-            nutr = (parsed.get("nutrition") or {}) if isinstance(parsed.get("nutrition"), dict) else {}
-            wanted = ["Calories", "Carbohydrates", "Protein", "Total Fat", "Sodium"]
-            if not all(k in nutr for k in wanted):
-                # allow a pass if calories and at least 3 others exist
-                keys_present = sum(1 for k in wanted if k in nutr)
-                if not ("Calories" in nutr and keys_present >= 4):
-                    return False
-            return True
-
-        # ---- First attempt ----
-        raw = _openai_text(base_prompt(strict=False), mdl, temp)
+        raw = _openai_text(prompt, mdl, temp)
+        if raw and raw.strip().upper().startswith("INSUFFICIENT"):
+            return {}
         parsed = parse_recipe_text_blocks(raw)
-
-        # If invalid, retry once with stricter guardrails
-        if not is_valid(parsed):
-            raw2 = _openai_text(base_prompt(strict=True), mdl, max(0.3, temp - 0.2))
-            parsed2 = parse_recipe_text_blocks(raw2)
-            if is_valid(parsed2):
-                return parsed2
-            # fall back to first if second also fails but first had at least something
-            return parsed if parsed else {}
-
-        return parsed
+        if parsed and (parsed.get("ingredients") or parsed.get("instructions")):
+            return parsed
+        return {}
     except Exception:
         return {}
 
@@ -2214,10 +2000,10 @@ st.caption("Auto-internal-linking from your sitemap + CTA + one-click publish to
 # Sidebar: API key
 with st.sidebar:
     st.subheader("🔑 OpenAI")
-    _k = st.text_input("API Key", type="password", value=st.session_state.get("API_KEY", ""))
+    _k = st.text_input("OpenAI API Key", type="password", value=st.session_state.get("OPENAI_API_KEY", ""))
     if _k:
-        st.session_state["API_KEY"] = _k
-    st.caption(f"API key detected: {bool(st.session_state.get('API_KEY') or os.getenv('API_KEY'))}")
+        st.session_state["OPENAI_API_KEY"] = _k
+    st.caption(f"API key detected: {bool(st.session_state.get('OPENAI_API_KEY') or os.getenv('OPENAI_API_KEY'))}")
 
 # Sidebar: Writer Identity
 with st.sidebar:
@@ -2561,16 +2347,16 @@ with col1:
             except Exception:
                 pass
         
-        if st.session_state.get("link_style","html") == "html" and mdlib:
+        if st.session_state.get("link_style","html") == "html":
             # Convert Markdown to HTML for preview if links are HTML
             if recipe_text and recipe_text.strip():
                 # For HTML preview with recipe card, use HTML component
-                html_content = mdlib.markdown(st.session_state["generated_md"])
+                html_content = md_to_html(st.session_state["generated_md"])
                 if "recipe_html" in locals():
                     html_content += "\n\n" + recipe_html
                 st.components.v1.html(html_content, height=700, scrolling=True)
             else:
-                st.components.v1.html(mdlib.markdown(st.session_state["generated_md"]), height=700, scrolling=True)
+                st.components.v1.html(md_to_html(st.session_state["generated_md"]), height=700, scrolling=True)
         else:
             st.markdown(content_to_display)
         
@@ -2746,7 +2532,8 @@ Generated: {metadata.get('generated_at', 'N/A')}"""
                                 )
                             if recipe and (recipe.get("ingredients") or recipe.get("instructions")):
                                 recipe = _make_recipe_halal(recipe)
-                                st.session_state["js_recipe_card_quick"] = generate_js_recipe_card(recipe)
+                                normalized = _normalize_recipe_for_tasty(recipe, author_name=st.session_state.get("author_name"))
+                                st.session_state["js_recipe_card_quick"] = generate_js_recipe_card(normalized)
                                 st.success("JavaScript snippet generated below. Copy and paste it into your browser console on the Tasty Recipes edit page.")
                             else:
                                 st.warning("No recipe detected from your inputs. Paste a recipe in 'Full Recipe' or ensure your article has a clear recipe section.")
@@ -3234,10 +3021,7 @@ Generated: {metadata.get('generated_at', 'N/A')}"""
                                     wp_progress_bar.progress(80)
                                     
                                     # Convert markdown to HTML
-                                    if mdlib:
-                                        content_html = mdlib.markdown(final_content)
-                                    else:
-                                        content_html = final_content.replace('\n', '<br>\n')
+                                    content_html = md_to_html(final_content)
                                     
                                     # Add recipe shortcode if available
                                     if tasty_id:
@@ -3449,21 +3233,7 @@ with col2:
                         wp_progress_bar.progress(60)
                         
                         content_md = st.session_state["generated_md"]
-                        if mdlib:
-                            content_html = mdlib.markdown(content_md)
-                        else:
-                            # Fallback: basic markdown to HTML conversion
-                            content_html = content_md
-                            # Convert headings
-                            content_html = re.sub(r'^### (.+)$', r'<h3>\1</h3>', content_html, flags=re.MULTILINE)
-                            content_html = re.sub(r'^## (.+)$', r'<h2>\1</h2>', content_html, flags=re.MULTILINE)
-                            content_html = re.sub(r'^# (.+)$', r'<h1>\1</h1>', content_html, flags=re.MULTILINE)
-                            # Convert bold text
-                            content_html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', content_html)
-                            # Convert line breaks to paragraphs
-                            content_html = re.sub(r'\n\n+', '</p><p>', content_html)
-                            content_html = f'<p>{content_html}</p>'
-                            content_html = content_html.replace('<p></p>', '')
+                        content_html = md_to_html(content_md)
                         
                         if tasty_id:
                             content_html += "\n\n" + embed_tasty_recipe_shortcode(tasty_id)
@@ -3573,7 +3343,8 @@ with col2:
                         )
                     if recipe and (recipe.get("ingredients") or recipe.get("instructions")):
                         recipe = _make_recipe_halal(recipe)
-                        st.session_state["js_recipe_card"] = generate_js_recipe_card(recipe)
+                        normalized = _normalize_recipe_for_tasty(recipe, author_name=st.session_state.get("author_name", ""))
+                        st.session_state["js_recipe_card"] = generate_js_recipe_card(normalized)
                         st.success("JavaScript snippet generated below. Copy and paste it into your browser console.")
                     else:
                         st.warning("No recipe detected from your inputs. Paste a recipe in 'Full Recipe' or ensure your article has a clear recipe section.")
@@ -3686,18 +3457,12 @@ def _normalize_recipe_for_tasty(recipe: dict, author_name: str = None) -> dict:
 
     return out
 
-# ---------- Step 5 ----------
 
-# ---------- Step 5 ----------
 st.divider()
 with st.container():
-    st.markdown("🚀 **Step 5:** AI-Generated TASTY RECIPE CARD (Pure JavaScript)")
-    st.caption(
-        "This step sends your article and optional 'Full Recipe (parsed for Tasty + fallback)' "
-        "to GPT to synthesize a well-organized recipe tailored for the WP Tasty plugin. "
-        "It does not copy your raw text verbatim; it restructures and cleans it specifically for the card."
-    )
-
+    st.markdown("---")
+    st.markdown("### 🚀 Step 5: AI-Generated TASTY RECIPE CARD (Pure JavaScript)")
+    st.caption("This step sends your article and optional 'Full Recipe (parsed for Tasty + fallback)' to GPT to synthesize a well-organized recipe tailored for the WP Tasty plugin. It does not copy your raw text verbatim; it restructures and cleans it specifically for the card.")
     if st.button("Generate via GPT (Best for Tasty)", use_container_width=True, key="generate_tasty_js_ai"):
         try:
             rtxt = st.session_state.get("recipe_text", "")
@@ -3706,383 +3471,21 @@ with st.container():
                 topic=st.session_state.get("topic", ""),
                 focus_keyword=st.session_state.get("focus_keyword", ""),
                 full_recipe_text=rtxt,
-                article_md=md,
+                article_md=md
             )
             if recipe and (recipe.get("ingredients") or recipe.get("instructions")):
                 recipe = _make_recipe_halal(recipe)
                 st.session_state["js_recipe_card_ai"] = generate_js_recipe_card(recipe)
-                st.success(
-                    "AI-generated JavaScript snippet ready below. Paste it into your browser console on the Tasty Recipes edit page."
-                )
+                st.success("AI-generated JavaScript snippet ready below. Paste it into your browser console on the Tasty Recipes edit page.")
             else:
-                st.warning(
-                    "AI could not synthesize a recipe from your inputs. Please ensure your article includes recipe details "
-                    "or provide them in 'Full Recipe'."
-                )
+                st.warning("AI could not synthesize a recipe from your inputs. Please ensure your article includes recipe details or provide them in 'Full Recipe'.")
         except Exception as e:
             st.error(f"Could not generate AI JS snippet: {e}")
 
-if st.session_state.get("js_recipe_card_ai"):
-    st.text_area(
-        "Copy & Paste the JavaScript below (AI)",
-        value=st.session_state["js_recipe_card_ai"],
-        height=260,
-        key="js_recipe_card_ai_textarea",
-    )
-    st.download_button(
-        "💾 Download AI JS file",
-        data=st.session_state["js_recipe_card_ai"],
-        file_name="tasty_recipe_fill_ai.js",
-        mime="text/javascript",
-        use_container_width=True,
-        key="download_js_ai",
-    )
-    st.caption(
-        "Tip: Paste into your browser console on the Tasty Recipes edit page, then press Enter. "
-        "This fills description, ingredients, instructions, notes, times, yield, tags, and nutrition."
-    )
+    if st.session_state.get("js_recipe_card_ai"):
+        st.text_area("Copy & Paste the JavaScript below (AI)", value=st.session_state["js_recipe_card_ai"], height=260, key="js_recipe_card_ai_textarea")
+        st.download_button("💾 Download AI JS file", data=st.session_state["js_recipe_card_ai"], file_name="tasty_recipe_fill_ai.js", mime="text/javascript", use_container_width=True, key="download_js_ai")
+        st.caption("Tip: Paste into your browser console on the Tasty Recipes edit page, then press Enter. This fills description, ingredients, instructions, notes, times, yield, tags, and nutrition.")
 
 if st.session_state.get("auto_post") and st.session_state.get("generated_md"):
     st.info("Auto-post is enabled. Click 'Post to WordPress' to publish the current draft.")
-
-# ---------- Schema Hydration (after Step 5, before Step 6) ----------
-recipe_title          = recipe_title         if 'recipe_title' in locals() else metadata.get('title')
-recipe_description    = recipe_description   if 'recipe_description' in locals() else metadata.get('description')
-recipe_category       = recipe_category      if 'recipe_category' in locals() else metadata.get('recipeCategory') or metadata.get('category')
-recipe_cuisine        = recipe_cuisine       if 'recipe_cuisine' in locals() else metadata.get('recipeCuisine') or metadata.get('cuisine')
-recipe_keywords       = recipe_keywords      if 'recipe_keywords' in locals() else metadata.get('keywords')
-servings              = servings             if 'servings' in locals() else metadata.get('servings')
-prep_minutes          = prep_minutes         if 'prep_minutes' in locals() else metadata.get('prep_minutes')
-cook_minutes          = cook_minutes         if 'cook_minutes' in locals() else metadata.get('cook_minutes')
-rest_minutes          = rest_minutes         if 'rest_minutes' in locals() else metadata.get('rest_minutes')
-total_minutes         = total_minutes        if 'total_minutes' in locals() else metadata.get('total_minutes')
-ingredients_list      = ingredients_list     if 'ingredients_list' in locals() else metadata.get('ingredients', [])
-instructions_list     = instructions_list    if 'instructions_list' in locals() else metadata.get('instructions', [])
-instruction_sections  = instruction_sections if 'instruction_sections' in locals() else metadata.get('instruction_sections')
-notes_list            = notes_list           if 'notes_list' in locals() else metadata.get('notes', [])
-nutrition_dict        = nutrition_dict       if 'nutrition_dict' in locals() else metadata.get('nutrition', {})
-tools_list            = tools_list           if 'tools_list' in locals() else metadata.get('tools')
-supplies_list         = supplies_list        if 'supplies_list' in locals() else metadata.get('supplies')
-featured_image        = featured_image       if 'featured_image' in locals() else metadata.get('featured_image') or metadata.get('image')
-video_object          = video_object         if 'video_object' in locals() else metadata.get('video')
-author_name           = author_name          if 'author_name' in locals() else metadata.get('author')
-publisher_name        = publisher_name       if 'publisher_name' in locals() else (metadata.get('publisher',{}) or {}).get('name')
-slug_or_url           = slug_or_url          if 'slug_or_url' in locals() else metadata.get('permalink') or metadata.get('url') or metadata.get('slug')
-
-def _clean_list(v):
-    if v is None:
-        return None
-    if isinstance(v, list):
-        return [str(x).strip() for x in v if str(x).strip()]
-    if isinstance(v, str):
-        return [x.strip() for x in v.splitlines() if x.strip()]
-    return None
-
-def _minutes(v):
-    try:
-        if v is None or v == "":
-            return None
-        if isinstance(v, (int, float)):
-            return int(v)
-        s = str(v).strip().lower()
-        if s.isdigit():
-            return int(s)
-        import re
-        h = m = 0
-        for num, unit in re.findall(r'(\d+)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)', s):
-            n = int(num)
-            if unit.startswith('h'):
-                h += n
-            else:
-                m += n
-        return h * 60 + m if (h or m) else None
-    except Exception:
-        return None
-
-def _image_obj(img):
-    if not img:
-        return None
-    if isinstance(img, dict) and img.get('url'):
-        io = {"@type": "ImageObject", "url": img.get('url')}
-        if img.get('width'):
-            io["width"] = img.get('width')
-        if img.get('height'):
-            io["height"] = img.get('height')
-        return io
-    if isinstance(img, str):
-        return img.strip() or None
-    return None
-
-_pm = _minutes(prep_minutes)
-_cm = _minutes(cook_minutes)
-_rm = _minutes(rest_minutes)
-_tm = _minutes(total_minutes)
-if _tm is None and (_pm or _cm or _rm):
-    _tm = (_pm or 0) + (_cm or 0) + (_rm or 0)
-
-se = (metadata.get("schema_elements") or {}).copy()
-
-def _nz(v):
-    if v is None:
-        return None
-    if isinstance(v, str):
-        return v.strip() or None
-    if isinstance(v, list):
-        vv = [x for x in v if str(x).strip()]
-        return vv or None
-    if isinstance(v, dict):
-        return v if any(x not in (None, "", []) for x in v.values()) else None
-    return v
-
-se.update({
-    "name":                 _nz(recipe_title),
-    "description":          _nz(recipe_description),
-    "recipeCategory":       _nz(recipe_category),
-    "recipeCuisine":        _nz(recipe_cuisine),
-    "keywords":             _nz(recipe_keywords),
-    "recipeYield":          _nz(f"{servings} servings" if servings else None),
-    "prepTime":             _nz(f"{_pm} min" if _pm is not None else None),
-    "cookTime":             _nz(f"{_cm} min" if _cm is not None else None),
-    "totalTime":            _nz(f"{_tm} min" if _tm is not None else None),
-    "recipeIngredient":     _nz(_clean_list(ingredients_list)),
-    "recipeInstructions":   _nz(_clean_list(instructions_list)),
-    "instruction_sections": _nz(instruction_sections),
-    "notes":                _nz(_clean_list(notes_list)),
-    "nutrition":            _nz(nutrition_dict),
-    "image":                _nz(_image_obj(featured_image)),
-    "author":               _nz(author_name),
-    "publisher":            _nz({"name": publisher_name}) if publisher_name else None,
-    "tools":                _nz(_clean_list(tools_list)) if tools_list else None,
-    "supplies":             _nz(_clean_list(supplies_list)) if supplies_list else None,
-    "video":                _nz(video_object),
-    "permalink":            _nz(slug_or_url),
-})
-metadata["schema_elements"] = {k: v for k, v in se.items() if v is not None}
-
-# --------------------- Step 6 (Minimal JSON-LD) ---------------------
-st.markdown("### 🛠️ Step 6: Generate Recipe JSON")
-
-def _coalesce(*values):
-    for v in values:
-        if v is None:
-            continue
-        if isinstance(v, str):
-            vv = v.strip()
-            if vv:
-                return vv
-        elif isinstance(v, (list, dict)):
-            if v:
-                return v
-        else:
-            return v
-    return None
-
-def _ensure_list(v):
-    if v is None:
-        return []
-    if isinstance(v, list):
-        return v
-    return [v]
-
-def _instructions_as_howto(items):
-    out = []
-    for it in items or []:
-        if isinstance(it, dict):
-            if it.get("@type") in ("HowToStep", "HowToSection"):
-                out.append(it)
-            elif it.get("text"):
-                out.append({"@type": "HowToStep", "text": str(it.get("text")).strip()})
-        else:
-            s = str(it).strip()
-            if s:
-                out.append({"@type": "HowToStep", "text": s})
-    return out
-
-def _image_value(val):
-    if not val:
-        return None
-    if isinstance(val, dict):
-        if val.get("url"):
-            io = {"@type": "ImageObject", "url": val.get("url")}
-            if val.get("width"): io["width"] = val.get("width")
-            if val.get("height"): io["height"] = val.get("height")
-            return io
-        if "@type" in val:
-            return val
-    if isinstance(val, str):
-        s = val.strip()
-        return s or None
-    if isinstance(val, list):
-        for x in val:
-            r = _image_value(x)
-            if r:
-                return r
-    return None
-
-def _as_keywords(v):
-    if not v:
-        return None
-    if isinstance(v, list):
-        parts = [str(x).strip() for x in v if str(x).strip()]
-        return ", ".join(parts) if parts else None
-    if isinstance(v, str):
-        s = v.strip()
-        return s or None
-    return None
-
-def build_recipe_json_ld_simple(meta: dict, site_url: str = None) -> dict:
-    se = (meta or {}).get("schema_elements") or {}
-    # Prefer schema_elements, fallback to meta
-
-    name        = _coalesce(se.get("name"),        meta.get("title"))
-    description = _coalesce(se.get("description"), meta.get("description"))
-    category    = _coalesce(se.get("recipeCategory"), meta.get("recipeCategory"), meta.get("category"))
-    cuisine     = _coalesce(se.get("recipeCuisine"),  meta.get("recipeCuisine"),  meta.get("cuisine"))
-    keywords    = _coalesce(se.get("keywords"), meta.get("keywords"), meta.get("tags"))
-    yield_text  = _coalesce(se.get("recipeYield"), meta.get("servings") and f"{meta.get('servings')} servings")
-
-    def _to_minutes_or_iso(x):
-        if x is None:
-            return None
-        if isinstance(x, (int, float)):
-            return _to_iso8601_minutes(int(x))
-        if isinstance(x, str):
-            s = x.strip()
-            if not s:
-                return None
-            try:
-                mins = _extract_minutes(s)
-                return _to_iso8601_minutes(int(mins)) if mins is not None else None
-            except Exception:
-                return None
-        return None
-
-    prep_iso  = _to_minutes_or_iso(_coalesce(se.get("prepTime"),  meta.get("prep_time"),  meta.get("prepTime")))
-    cook_iso  = _to_minutes_or_iso(_coalesce(se.get("cookTime"),  meta.get("cook_time"),  meta.get("cookTime")))
-    total_iso = _to_minutes_or_iso(_coalesce(se.get("totalTime"), meta.get("total_time"), meta.get("totalTime")))
-
-    ingredients = _coalesce(se.get("recipeIngredient"), meta.get("ingredients"))
-    ingredients = [str(x).strip() for x in _ensure_list(ingredients) if str(x).strip()]
-    instructions = _coalesce(se.get("recipeInstructions"), meta.get("instructions"))
-    instructions = _instructions_as_howto(instructions if isinstance(instructions, list) else _ensure_list(instructions))
-
-    image = _image_value(_coalesce(se.get("image"), meta.get("featured_image"), meta.get("image")))
-    author = _coalesce(se.get("author"), meta.get("author"))
-    permalink = _coalesce(se.get("permalink"), meta.get("permalink"), meta.get("url"), meta.get("slug"))
-    site = (site_url or "").strip() or (permalink or "")
-
-    nutrition_raw = _coalesce(se.get("nutrition"), meta.get("nutrition"))
-    nutrition_obj = None
-    if isinstance(nutrition_raw, dict) and nutrition_raw:
-        allowed = {"calories","carbohydrateContent","cholesterolContent","fatContent","fiberContent","proteinContent","saturatedFatContent","sodiumContent","sugarContent","transFatContent","unsaturatedFatContent","servingSize"}
-        filtered = {k: v for k, v in nutrition_raw.items() if k in allowed and v not in (None, "", [])}
-        if filtered:
-            nutrition_obj = {"@type": "NutritionInformation", **filtered}
-
-    agg = _coalesce(se.get("aggregateRating"), meta.get("aggregateRating"))
-    agg_obj = None
-    if isinstance(agg, dict) and agg.get("ratingValue"):
-        agg_obj = {"@type": "AggregateRating"}
-        agg_obj.update({k: v for k, v in agg.items() if v is not None})
-
-    missing = []
-    if not name:          missing.append("name")
-    if not description:   missing.append("description")
-    if not ingredients:   missing.append("recipeIngredient")
-    if not instructions:  missing.append("recipeInstructions")
-    if missing:
-        raise ValueError("Missing required fields: " + ", ".join(missing))
-
-    recipe = {
-        "@context": "https://schema.org",
-        "@type": "Recipe",
-        "name": name,
-        "description": description,
-        **({"recipeCategory": category} if category else {}),
-        **({"recipeCuisine": cuisine} if cuisine else {}),
-        **({"keywords": _as_keywords(keywords)} if _as_keywords(keywords) else {}),
-        **({"recipeYield": str(yield_text)} if yield_text else {}),
-        **({"prepTime": prep_iso} if prep_iso else {}),
-        **({"cookTime": cook_iso} if cook_iso else {}),
-        **({"totalTime": total_iso} if total_iso else {}),
-        "recipeIngredient": ingredients,
-        "recipeInstructions": instructions,
-        **({"image": image} if image else {}),
-        **({"author": {"@type": "Person", "name": author}} if author else {}),
-        **({"aggregateRating": agg_obj} if agg_obj else {}),
-        **({"nutrition": nutrition_obj} if nutrition_obj else {}),
-        **({"mainEntityOfPage": {"@type": "WebPage", "@id": str(site)}} if site else {}),
-    }
-    return recipe
-
-site_url_min = st.text_input("Site URL for mainEntityOfPage", value=metadata.get("permalink", "https://tastetorate.com/"))
-if st.button("Generate Recipe JSON-LD (Minimal)", type="primary"):
-    try:
-        schema_dict = build_recipe_json_ld_simple(metadata, site_url=site_url_min)
-        schema_json = json.dumps(schema_dict, ensure_ascii=False, indent=2)
-        st.code(schema_json, language="json")
-        st.download_button(
-            "Download recipe.schema.json",
-            schema_json,
-            file_name="recipe.schema.json",
-            mime="application/ld+json",
-        )
-        st.success("✅ Recipe JSON-LD generated.")
-    except Exception as e:
-        st.error(f"❌ Schema build failed: {e}")
-
-with st.expander("🧪 Schema Debug"):
-    se_dbg = metadata.get("schema_elements") or {}
-    recommended = [
-        "name", "description", "recipeIngredient", "recipeInstructions"
-    ]
-    missing = [k for k in recommended if not _coalesce(se_dbg.get(k), metadata.get(k))]
-    st.write("Present (metadata + schema_elements merged, keys only):", sorted(list(set(list(se_dbg.keys()) + list(metadata.keys())))))
-    st.write("Missing required for JSON-LD:", missing)
-
-
-
-
-# -------------------------------
-# Step 6: Generate Recipe JSON
-# -------------------------------
-import json
-
-st.header("🛠️ Step 6: Generate Recipe JSON")
-
-def build_recipe_json_ld(recipe: dict):
-    return {
-        "@context": "https://schema.org/",
-        "@type": "Recipe",
-        "mainEntityOfPage": {
-            "@type": "WebPage",
-            "@id": recipe.get("url", "")
-        },
-        "name": recipe.get("title", "Untitled Recipe"),
-        "description": recipe.get("description", "A delicious homemade recipe."),
-        "author": {"@type": "Person", "name": recipe.get("author", "Abby Martin")},
-        "image": [recipe.get("image_url", "")] if recipe.get("image_url") else [],
-        "datePublished": recipe.get("date_published", ""),
-        "recipeYield": recipe.get("yield", ""),
-        "prepTime": recipe.get("prep_time", ""),
-        "totalTime": recipe.get("total_time", ""),
-        "recipeCategory": recipe.get("category", "Dessert"),
-        "recipeCuisine": recipe.get("cuisine", ""),
-        "keywords": recipe.get("keywords", ""),
-        "recipeIngredient": recipe.get("ingredients", []),
-        "recipeInstructions": [
-            {"@type": "HowToStep", "text": step}
-            for step in recipe.get("instructions", [])
-        ],
-        "nutrition": {"@type": "NutritionInformation", **recipe.get("nutrition", {})}
-    }
-
-if "recipe_data" in st.session_state:
-    recipe = st.session_state["recipe_data"]
-    recipe_json = build_recipe_json_ld(recipe)
-    json_str = json.dumps(recipe_json, indent=2)
-
-    st.code(json_str, language="json")
-    st.download_button("📥 Download Recipe JSON", json_str, file_name="recipe.json")
-else:
-    st.warning("⚠️ No recipe data available. Please complete previous steps first.")
