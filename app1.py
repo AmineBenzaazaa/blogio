@@ -68,11 +68,39 @@ SETTINGS_FILE = Path(__file__).with_name("settings.json")
 
 def load_settings_into_session():
     try:
+        # Load environment variables from .env if available
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except Exception:
+            # Fallback: manually load .env if python-dotenv is not installed
+            try:
+                env_path = Path(__file__).with_name(".env")
+                if env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        s = line.strip()
+                        if not s or s.startswith("#"):
+                            continue
+                        if s.startswith("export "):
+                            s = s[len("export "):].strip()
+                        if "=" not in s:
+                            continue
+                        k, v = s.split("=", 1)
+                        k = k.strip()
+                        v = v.strip()
+                        # strip optional quotes
+                        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                            v = v[1:-1]
+                        os.environ.setdefault(k, v)
+            except Exception:
+                pass
         if st.session_state.get("_settings_loaded"):
             return
         if SETTINGS_FILE.exists():
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8", errors="ignore"))
             for k, v in data.items():
+                if k == "OPENAI_API_KEY":
+                    continue
                 st.session_state[k] = v
         st.session_state["_settings_loaded"] = True
     except Exception as e:
@@ -81,8 +109,8 @@ def load_settings_into_session():
 def save_current_settings():
     try:
         keys = [
-            # auth
-            "OPENAI_API_KEY",
+            # auth (do NOT persist API keys)
+            # "OPENAI_API_KEY",  # removed: use .env only
 
             # social + CTA
             "fb_url","pin_url","append_cta",
@@ -116,10 +144,38 @@ load_settings_into_session()
 # OpenAI client
 # ---------------------------------------------------------
 def get_client():
-    key = st.session_state.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        # Lazy-load .env now in case settings haven't been loaded yet
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except Exception:
+            # Manual .env parsing fallback
+            try:
+                env_path = Path(__file__).with_name(".env")
+                if env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        s = line.strip()
+                        if not s or s.startswith("#"):
+                            continue
+                        if s.startswith("export "):
+                            s = s[len("export ") :].strip()
+                        if "=" not in s:
+                            continue
+                        k, v = s.split("=", 1)
+                        k = k.strip()
+                        v = v.strip()
+                        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                            v = v[1:-1]
+                        os.environ.setdefault(k, v)
+            except Exception:
+                pass
+        # Try again after loading
+        key = os.getenv("OPENAI_API_KEY")
     if not key:
         try:
-            st.sidebar.error("Please enter your OpenAI API key in the sidebar.")
+            st.sidebar.error("OPENAI_API_KEY not found. Add it to your .env file.")
         except Exception:
             pass
         raise RuntimeError("OPENAI_API_KEY missing")
@@ -1528,12 +1584,18 @@ Article Content:
 
 Generate prompts for these 7 images in order:
 1. Featured Image (Hero shot – top of article)
-2. Ingredients Image (After ingredients section)
-3. Step Image 1 (After first key preparation step)
-4. Step Image 2 (After decorating or detailed preparation step)
-5. Step Image 3 (After cooking, baking, or chilling)
-6. Serving Image (In serving section)
+2. Ingredients Image (Immediately after the Ingredients section ends — not within instructions)
+3. Step Image 1 (Place after Instruction step 1 — show only the action/technique in step 1)
+4. Step Image 2 (Place after Instruction step 2 — show only the action/technique in step 2)
+5. Step Image 3 (Place after Instruction step 3 — show only the action/technique in step 3)
+6. Serving Image (Within the Serving/Serving Suggestions section if it exists)
 7. Recipe Card Image (Clean top-down, end of article)
+
+STRICT RULES FOR STEP IMAGES (step1, step2, step3):
+- The prompt must focus ONLY on the instruction action and technique for that specific step.
+- DO NOT include serving, plating, garnishing, ingredients flat-lay, or finished hero context.
+- Use imperative, instructional language with concrete details (tools, cookware, angle, textures, doneness cues, hands-in-frame if relevant).
+- Maintain exact continuity with the SAME batch as featured via the style anchor and the same seed.
 
 For each image, provide:
 - A detailed MidJourney prompt with style anchor and seed
@@ -1642,38 +1704,38 @@ Make the prompts specific to the actual recipe content. Replace [dish name] and 
                     },
                     {
                         "type": "step1",
-                        "prompt": f"Cooking {topic} first step, hands in action. {style_anchor} --seed {seed}",
+                        "prompt": f"Instruction-only process photo for step 1 of {focus_keyword}: hands actively performing the technique with the correct tool and vessel; emphasize textures and doneness cues (e.g., glossy, thickened, bubbling). Tight composition, 45° angle or overhead as appropriate, no plating or serving context. {style_anchor} --seed {seed}",
                         "placement": "In instructions section after step 1",
-                        "description": "First cooking step",
+                        "description": "Instructional action for step 1 (tools, textures, technique only)",
                         "seo_metadata": {
-                            "alt_text": f"Making {focus_keyword} step 1 preparation process",
+                            "alt_text": f"{focus_keyword} step 1 instructional process shot",
                             "filename": f"{keyword_slug}-step1.jpg",
-                            "caption": f"Beginning the {focus_keyword} preparation",
-                            "description": f"The first step in creating this delicious {focus_keyword} sets the foundation for success."
+                            "caption": f"{focus_keyword}: step 1 technique in action",
+                            "description": f"Close-up process image showing only the technique for step 1 while making {focus_keyword}, focusing on tools and textures with no serving context."
                         }
                     },
                     {
                         "type": "step2",
-                        "prompt": f"Cooking {topic} middle step, process shot. {style_anchor} --seed {seed}",
+                        "prompt": f"Instruction-only process photo for step 2 of {focus_keyword}: demonstrate the mid-process technique with hands-in-frame if relevant; include cookware, utensils, and texture progression. Keep composition clean, avoid garnish/finished plating. {style_anchor} --seed {seed}",
                         "placement": "In instructions section after step 2",
-                        "description": "Mid-process cooking step",
+                        "description": "Instructional action for step 2 (tools, textures, technique only)",
                         "seo_metadata": {
-                            "alt_text": f"{focus_keyword} cooking process step 2 in progress",
+                            "alt_text": f"{focus_keyword} step 2 instructional process shot",
                             "filename": f"{keyword_slug}-step2.jpg",
-                            "caption": f"Continuing the {focus_keyword} cooking process",
-                            "description": f"This crucial step ensures your {focus_keyword} develops the perfect texture and flavor."
+                            "caption": f"{focus_keyword}: step 2 technique in action",
+                            "description": f"Process image focused strictly on step 2 while making {focus_keyword}, highlighting technique and texture progression with no serving or ingredients flat-lay."
                         }
                     },
                     {
                         "type": "step3",
-                        "prompt": f"Final cooking step for {topic}, nearly complete. {style_anchor} --seed {seed}",
+                        "prompt": f"Instruction-only process photo for step 3 of {focus_keyword}: final technique or finish cue (e.g., stir until emulsified, bake until golden), show close texture/doneness indicators. No hero plating, no garnish. {style_anchor} --seed {seed}",
                         "placement": "In instructions section after step 3",
-                        "description": "Final cooking step",
+                        "description": "Instructional action for step 3 (tools, textures, technique only)",
                         "seo_metadata": {
-                            "alt_text": f"{focus_keyword} final cooking step almost complete",
+                            "alt_text": f"{focus_keyword} step 3 instructional process shot",
                             "filename": f"{keyword_slug}-step3.jpg",
-                            "caption": f"Final touches on the {focus_keyword}",
-                            "description": f"The final step brings your {focus_keyword} to perfection with these finishing touches."
+                            "caption": f"{focus_keyword}: step 3 technique in action",
+                            "description": f"Process image focused strictly on step 3 while making {focus_keyword}, emphasizing final technique and clear doneness cues without any serving context."
                         }
                     },
                     {
@@ -2017,11 +2079,8 @@ st.caption("Auto-internal-linking from your sitemap + CTA + one-click publish to
 
 # Sidebar: API key
 with st.sidebar:
-    st.subheader("🔑 OpenAI")
-    _k = st.text_input("OpenAI API Key", type="password", value=st.session_state.get("OPENAI_API_KEY", ""))
-    if _k:
-        st.session_state["OPENAI_API_KEY"] = _k
-    st.caption(f"API key detected: {bool(st.session_state.get('OPENAI_API_KEY') or os.getenv('OPENAI_API_KEY'))}")
+    if not os.getenv("OPENAI_API_KEY"):
+        st.info("Set OPENAI_API_KEY in a .env file next to app1.py (or export it in your shell). Create a .env file with a line: OPENAI_API_KEY=sk-... (the file is already in .gitignore).")
 
 # Sidebar: Writer Identity
 with st.sidebar:
@@ -2606,101 +2665,123 @@ with col1:
                     # Create a modified version of the article with image placeholders
                     modified_content = st.session_state["generated_md"]
                     
-                    # Insert images at appropriate locations based on the 4-part article structure
-                    for img_type, img_data in uploaded_images.items():
+                    # Helper utilities for robust placement independent of upload order
+                    import re
+                    def _find_section_bounds(text: str, heading_variants):
+                        for hv in heading_variants:
+                            pos = text.find(hv)
+                            if pos != -1:
+                                start = pos + len(hv)
+                                next_h = text.find("\n## ", start)
+                                end = next_h if next_h != -1 else len(text)
+                                return (pos, start, end, hv)
+                        return (-1, -1, -1, None)
+
+                    def _insert_at(text: str, idx: int, insert: str) -> str:
+                        if idx < 0:
+                            return text + insert
+                        return text[:idx] + insert + text[idx:]
+
+                    def _insert_after_nth_step(text: str, n: int, heading_variants):
+                        # Find instructions section
+                        s_pos, s_start, s_end, hv = _find_section_bounds(text, heading_variants)
+                        if s_pos == -1:
+                            return text  # no section, skip
+                        section = text[s_start:s_end]
+                        # Patterns for numbered lists (1. or 1) ) and explicit Step N labels
+                        pat_num = re.compile(rf"^\s*{n}[\).]\s", re.MULTILINE)
+                        pat_word = re.compile(rf"^\s*(?:Step\s+{n}\b)", re.IGNORECASE | re.MULTILINE)
+                        m = pat_num.search(section) or pat_word.search(section)
+                        if not m:
+                            # Fallback placements: start/middle/end depending on n
+                            if n == 1:
+                                insert_idx = s_start
+                            elif n == 2:
+                                insert_idx = s_start + (s_end - s_start) // 2
+                            else:
+                                insert_idx = s_end
+                            return _insert_at(text, insert_idx, img_content)
+                        # determine the end of this step block -> until next step marker or blank line
+                        step_start = s_start + m.end()
+                        next_blank = re.search(r"\n\s*\n", text[step_start:s_end])
+                        next_step = re.compile(r"^\s*(?:\d+[\).]\s|Step\s+\d+\b)", re.MULTILINE).search(text[step_start:s_end])
+                        rel_end = None
+                        if next_step:
+                            rel_end = next_step.start()
+                        if next_blank and (rel_end is None or next_blank.start() < rel_end):
+                            rel_end = next_blank.end()
+                        if rel_end is None:
+                            insert_idx = s_end
+                        else:
+                            insert_idx = step_start + rel_end
+                        return _insert_at(text, insert_idx, img_content)
+
+                    # Deterministic expected order regardless of upload order
+                    expected_order = ["ingredients", "step1", "step2", "step3", "serving", "recipe_card"]
+                    ordered_types = [t for t in expected_order if t in uploaded_images]
+                    for t in uploaded_images.keys():
+                        if t not in ordered_types and t != "featured":
+                            ordered_types.append(t)
+
+                    # Insert images at appropriate locations based on the actual article structure
+                    for img_type in ordered_types:
+                        img_data = uploaded_images[img_type]
                         # Get SEO metadata
                         seo_metadata = img_data.get('seo_metadata', {})
                         file_name = seo_metadata.get('filename', img_data['file'].name)
                         alt_text = seo_metadata.get('alt_text', img_data['description'])
                         caption = seo_metadata.get('caption', img_data['description'])
-                        
+
                         # Create WordPress-compatible placeholder URLs (will be replaced with actual URLs during publishing)
                         current_date = datetime.datetime.now()
                         wp_placeholder_url = f"wp-content/uploads/{current_date.year}/{current_date.month:02d}/{file_name}"
-                        
-                        # Create both markdown and HTML versions for different uses
-                        img_markdown = f"\n\n![{alt_text}]({wp_placeholder_url})\n*{caption}*\n\n"
-                        img_html = f'\n\n<img src="{wp_placeholder_url}" alt="{alt_text}" class="recipe-image" />\n<p class="image-caption"><em>{caption}</em></p>\n\n'
-                        
+
                         # Use HTML for better WordPress compatibility
+                        img_html = f'\n\n<img src="{wp_placeholder_url}" alt="{alt_text}" class="recipe-image" />\n<p class="image-caption"><em>{caption}</em></p>\n\n'
                         img_content = img_html
-                        
+
                         # Insert based on image type and the actual article structure
                         if img_type == "featured":
                             # Skip inserting featured image into article content - it will be set as WordPress featured image only
                             continue
-                            
                         elif img_type == "ingredients":
-                            # Insert in Part 2: "How To Make It (Mix & Ingredients)"
-                            if "## How To Make It" in modified_content:
-                                parts = modified_content.split("## How To Make It", 1)
-                                if len(parts) == 2:
-                                    # Find a good spot within this section (after first paragraph)
-                                    section_content = parts[1]
-                                    # Look for first paragraph break
-                                    first_para_end = section_content.find("\n\n")
-                                    if first_para_end != -1:
-                                        before = section_content[:first_para_end]
-                                        after = section_content[first_para_end:]
-                                        modified_content = parts[0] + "## How To Make It" + before + img_content + after
-                                    else:
-                                        # Insert at beginning of section
-                                        modified_content = parts[0] + "## How To Make It" + img_content + section_content
-                            
+                            # Place immediately after Ingredients section ends
+                            ing_headings = ["## Ingredients", "### Ingredients", "## Ingredient", "### Ingredient"]
+                            pos, start, end, hv = _find_section_bounds(modified_content, ing_headings)
+                            if pos != -1:
+                                modified_content = _insert_at(modified_content, end, img_content)
+                            else:
+                                # fallback: before Instructions/How To Make It if present, else append
+                                instr_heads = ["## Instructions", "## How To Make It", "## Method", "## Directions"]
+                                i_pos, i_start, i_end, _ = _find_section_bounds(modified_content, instr_heads)
+                                if i_pos != -1:
+                                    modified_content = _insert_at(modified_content, i_pos, img_content)
+                                else:
+                                    modified_content += img_content
                         elif img_type == "step1":
-                            # Insert in Part 2: "How To Make It (Mix & Ingredients)" - middle
-                            if "## How To Make It" in modified_content:
-                                parts = modified_content.split("## How To Make It", 1)
-                                if len(parts) == 2:
-                                    section_content = parts[1]
-                                    # Find the middle of the section
-                                    paragraphs = section_content.split("\n\n")
-                                    if len(paragraphs) > 2:
-                                        mid_point = len(paragraphs) // 2
-                                        before_paras = paragraphs[:mid_point]
-                                        after_paras = paragraphs[mid_point:]
-                                        modified_content = parts[0] + "## How To Make It" + "\n\n".join(before_paras) + img_content + "\n\n".join(after_paras)
-                                    
+                            instr_heads = ["## Instructions", "## How To Make It", "## Method", "## Directions"]
+                            modified_content = _insert_after_nth_step(modified_content, 1, instr_heads)
                         elif img_type == "step2":
-                            # Insert in Part 2: "How To Make It (Mix & Ingredients)" - near end
-                            if "## How To Make It" in modified_content:
-                                parts = modified_content.split("## How To Make It", 1)
-                                if len(parts) == 2:
-                                    section_content = parts[1]
-                                    # Find next section to insert before it
-                                    next_section_pos = section_content.find("\n## ")
-                                    if next_section_pos != -1:
-                                        before_next = section_content[:next_section_pos]
-                                        after_next = section_content[next_section_pos:]
-                                        modified_content = parts[0] + "## How To Make It" + before_next + img_content + after_next
-                                    else:
-                                        modified_content = parts[0] + "## How To Make It" + section_content + img_content
-                                        
+                            instr_heads = ["## Instructions", "## How To Make It", "## Method", "## Directions"]
+                            modified_content = _insert_after_nth_step(modified_content, 2, instr_heads)
                         elif img_type == "step3":
-                            # Insert in Part 3: "Make-Ahead & Storage"
-                            if "## Make-Ahead" in modified_content:
-                                parts = modified_content.split("## Make-Ahead", 1)
-                                if len(parts) == 2:
-                                    section_content = parts[1]
-                                    # Insert at beginning of section
-                                    first_para_end = section_content.find("\n\n")
-                                    if first_para_end != -1:
-                                        before = section_content[:first_para_end]
-                                        after = section_content[first_para_end:]
-                                        modified_content = parts[0] + "## Make-Ahead" + before + img_content + after
-                                    else:
-                                        modified_content = parts[0] + "## Make-Ahead" + img_content + section_content
-                                        
+                            instr_heads = ["## Instructions", "## How To Make It", "## Method", "## Directions"]
+                            modified_content = _insert_after_nth_step(modified_content, 3, instr_heads)
                         elif img_type == "serving":
-                            # Insert before FAQ section
-                            if "## FAQ" in modified_content:
+                            # Prefer Serving section, else before FAQ, else end
+                            serving_heads = ["## Serving", "## Serving Suggestions", "## How to Serve"]
+                            s_pos, s_start, s_end, _ = _find_section_bounds(modified_content, serving_heads)
+                            if s_pos != -1:
+                                modified_content = _insert_at(modified_content, s_start, img_content)
+                            elif "## FAQ" in modified_content:
                                 modified_content = modified_content.replace("## FAQ", img_content + "## FAQ")
                             else:
-                                # Fallback: add at the end if no FAQ section found
                                 modified_content += img_content
-                                    
                         elif img_type == "recipe_card" or "recipe" in img_type:
                             # Insert at the very end
+                            modified_content += img_content
+                        else:
+                            # Unknown type -> append to end
                             modified_content += img_content
                     
                     # Update session state with modified content
