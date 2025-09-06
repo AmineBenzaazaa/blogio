@@ -11,6 +11,7 @@ import os
 import io
 import re
 import json
+import html
 import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
@@ -449,6 +450,8 @@ def parse_recipe_text_blocks(recipe_text: str) -> Dict[str, Any]:
     nutrition: Dict[str, str] = {}
     category = None
     cuisine = None
+    method = None
+    diet = None
     keywords: List[str] = []
     servings = None
     yield_str = None
@@ -484,8 +487,9 @@ def parse_recipe_text_blocks(recipe_text: str) -> Dict[str, Any]:
         elif L.startswith("diet:"):
             diet_line = ln.split(":",1)[-1].strip()
             if diet_line:
-                # Store diet in keywords for now; generator has a dedicated diet field, but parser keeps simple structure
-                keywords.append(diet_line)
+                diet = diet_line
+                if diet_line.lower() not in [x.lower() for x in keywords]:
+                    keywords.append(diet_line)
         elif L.startswith("keywords:"):
             kws = ln.split(":",1)[-1].strip()
             if kws:
@@ -535,6 +539,8 @@ def parse_recipe_text_blocks(recipe_text: str) -> Dict[str, Any]:
         "nutrition": nutrition if nutrition else None,
         "category": category,
         "cuisine": cuisine,
+        "method": method,
+        "diet": diet,
         "keywords": keywords[:12],
         "servings": servings,
         "yield": yield_str or servings,
@@ -884,15 +890,20 @@ def synthesize_recipe_from_context(
         context = "\n\n".join(context_bits) or "No explicit recipe text was provided."
 
         prompt = f"""
-From the context below, synthesize a single, clean, well-organized recipe in PLAIN TEXT using EXACTLY this format so a simple parser can read it. Only include lines that are supported by the context:
+From the context below, synthesize a single, clean, well-organized recipe in PLAIN TEXT using EXACTLY this format so a simple parser can read it.
 
 Title on the first line
 Optional short description on the second line
-[Optional if present] Prep time: <number> m or h m
-[Optional if present] Cook time: <number> m or h m
-[Optional if present] Total time: <number> m or h m
-[Optional if present] Yield: <e.g., 4 servings or 1 loaf>
-[Optional if present] Servings: <e.g., 4 servings>
+Prep time: <number> m or h m
+Cook time: <number> m or h m
+Total time: <number> m or h m
+Yield: <e.g., 12 cookies or 1 loaf>
+Servings: <e.g., 12 servings>
+Category: <e.g., Dessert>
+Method: <e.g., Baked>
+Cuisine: <e.g., American>
+Diet: <e.g., Vegetarian>
+Keywords: <comma-separated keywords>
 
 Ingredients
 - item 1
@@ -904,25 +915,32 @@ Instructions
 2. step 2
 3. ...
 
-[Optional if present] Notes
+Notes
 - note line 1
 - note line 2
 
-[Optional if present] Nutrition
-Calories: <value>
-Carbohydrates: <value>
-Protein: <value>
-Fat: <value>
-Sodium: <value>
+Nutrition
+Serving Size: <e.g., 1 cookie>
+Calories: <e.g., 210 kcal>
+Carbohydrates: <e.g., 28 g>
+Protein: <e.g., 3 g>
+Fat: <e.g., 9 g>
+Saturated Fat: <e.g., 5 g>
+Unsaturated Fat: <e.g., 3 g>
+Trans Fat: <e.g., 0 g>
+Cholesterol: <e.g., 20 mg>
+Sodium: <e.g., 120 mg>
+Fiber: <e.g., 1 g>
+Sugar: <e.g., 16 g>
 
 Rules:
-- Use only information present in the provided context; do not invent or guess any details not supported by the context.
-- If the context is insufficient to produce a specific, truthful recipe with concrete ingredients and steps, respond with the single word INSUFFICIENT.
-- Use US measurements where present in the context; do not convert or infer amounts that are not stated.
+- Use information from the provided context. When values are not explicitly given, infer reasonable, specific values based on the recipe's ingredients and method (do not leave items blank).
+- If the context is insufficient to produce a specific recipe with concrete ingredients and steps, respond with the single word INSUFFICIENT.
+- Use US measurements and kitchen conventions where appropriate; do not add commentary, ranges, or approximation words.
 - Avoid any code fences, Markdown headings (#), or extra labeling not shown in the format.
-- Include time, yield/servings, and nutrition lines ONLY if the context explicitly provides them; otherwise omit those lines entirely.
 - Keep the title concise and descriptive.
 - Keep ingredient lines one per line; keep steps concise but precise.
+- Provide nutrition values per serving with units (kcal, g, mg). Always include all fields above.
 
 Context:
 Topic: {topic}
@@ -2448,196 +2466,11 @@ with col1:
                     st.markdown("**Schema Description:**")
                     st.code(schema_elements.get('description', 'N/A'), language=None)
             
-            with tab4:
-                st.markdown("#### Copy-Ready Text for Manual Entry")
-                st.markdown("Use these optimized texts for manual entry into RankMath or other SEO plugins.")
-                
-                # Create copyable text blocks
-                # Character count helpers
-                seo_title = metadata.get('seo_title', 'N/A')
-                meta_desc = metadata.get('meta_description', 'N/A')
-                permalink = metadata.get('permalink_slug', 'N/A')
-                
-                seo_title_len = len(seo_title) if seo_title != 'N/A' else 0
-                meta_desc_len = len(meta_desc) if meta_desc != 'N/A' else 0
-                permalink_len = len(permalink) if permalink != 'N/A' else 0
-                
-                # Color coding for character limits
-                title_color = "🟢" if 50 <= seo_title_len <= 60 else "🟡" if seo_title_len > 0 else "🔴"
-                desc_color = "🟢" if 150 <= meta_desc_len <= 160 else "🟡" if meta_desc_len > 0 else "🔴"
-                permalink_color = "🟢" if 1 <= permalink_len <= 75 else "🟡" if permalink_len > 0 else "🔴"
-                
-                copy_text = f"""SEO TITLE ({seo_title_len}/60):
-{seo_title}
+            
 
-META DESCRIPTION ({meta_desc_len}/160):
-{meta_desc}
-
-PERMALINK/SLUG ({permalink_len}/75):
-{permalink}
-
-FOCUS KEYWORD:
-{metadata.get('focus_keyword', 'N/A')}
-
-SECONDARY KEYWORDS:
-{', '.join(metadata.get('secondary_keywords', []))}
-
-OPEN GRAPH TITLE:
-{metadata.get('og_title', 'N/A')}
-
-OPEN GRAPH DESCRIPTION:
-{metadata.get('og_description', 'N/A')}
-
-TWITTER TITLE:
-{metadata.get('twitter_title', 'N/A')}
-
-TWITTER DESCRIPTION:
-{metadata.get('twitter_description', 'N/A')}
-
-ADDITIONAL TAGS:
-{', '.join(metadata.get('additional_tags', []))}
-
-SCHEMA MARKUP:
-Type: {metadata.get('schema_type', 'Recipe')}
-Name: {metadata.get('schema_elements', {}).get('name', 'N/A')}
-Category: {metadata.get('schema_elements', {}).get('recipeCategory', 'N/A')}
-Cuisine: {metadata.get('schema_elements', {}).get('recipeCuisine', 'N/A')}
-Keywords: {metadata.get('schema_elements', {}).get('keywords', 'N/A')}
-Description: {metadata.get('schema_elements', {}).get('description', 'N/A')}
-
-Generated: {metadata.get('generated_at', 'N/A')}"""
+# Generated: {metadata.get('generated_at', 'N/A')}"""
                 
-                st.text_area("Complete SEO Metadata (Copy All)", copy_text, height=400)
-                
-                # Quick-access TASTY Recipe Card generator (alternative placement near Schema Markup / RankMath)
-                with st.expander("🍫 Quick TASTY Recipe Card Generator", expanded=False):
-                    st.caption("Generate the pure JavaScript snippet to auto-fill a Tasty Recipe Card. This works even if Step 4 is hidden.")
-                    if st.button("Generate TASTY RECIPE CARD", key="generate_tasty_js_quick", use_container_width=True):
-                        try:
-                            rtxt = st.session_state.get("recipe_text", "")
-                            md = st.session_state.get("generated_md", "")
-                            recipe = None
-                            if rtxt.strip():
-                                recipe = parse_recipe_text_blocks(rtxt)
-                            if (not recipe or not (recipe.get("ingredients") or recipe.get("instructions"))) and md.strip():
-                                extracted = _extract_recipe_from_article_md(md)
-                                if extracted and (extracted.get("ingredients") or extracted.get("instructions")):
-                                    recipe = extracted
-                            if not recipe or not (recipe.get("ingredients") or recipe.get("instructions")):
-                                recipe = synthesize_recipe_from_context(
-                                    topic=st.session_state.get("topic", ""),
-                                    focus_keyword=st.session_state.get("focus_keyword", ""),
-                                    full_recipe_text=rtxt,
-                                    article_md=md
-                                )
-                            if recipe and (recipe.get("ingredients") or recipe.get("instructions")):
-                                recipe = _make_recipe_halal(recipe)
-                                normalized = _normalize_recipe_for_tasty(recipe, author_name=st.session_state.get("author_name"))
-                                st.session_state["js_recipe_card_quick"] = generate_js_recipe_card(normalized)
-                                st.success("JavaScript snippet generated below. Copy and paste it into your browser console on the Tasty Recipes edit page.")
-                            else:
-                                st.warning("No recipe detected from your inputs. Paste a recipe in 'Full Recipe' or ensure your article has a clear recipe section.")
-                        except Exception as e:
-                            st.error(f"Could not generate JS snippet: {e}")
-                    
-                    if st.session_state.get("js_recipe_card_quick"):
-                        st.text_area("Copy & Paste the JavaScript below", value=st.session_state["js_recipe_card_quick"], height=260, key="js_recipe_card_quick_textarea")
-                        st.download_button(
-                            "💾 Download JS file",
-                            data=st.session_state["js_recipe_card_quick"],
-                            file_name="tasty_recipe_fill.js",
-                            mime="text/javascript",
-                            use_container_width=True,
-                            key="download_js_quick"
-                        )
-                
-                # Character limit indicators
-                st.markdown("**📊 Character Limit Status:**")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.markdown(f"{title_color} **Title:** {seo_title_len}/60")
-                with col2:
-                    st.markdown(f"{desc_color} **Description:** {meta_desc_len}/160")
-                with col3:
-                    st.markdown(f"{permalink_color} **Permalink:** {permalink_len}/75")
-                
-                # Enhanced copyable sections with character limits
-                st.markdown("**🎯 Quick Copy Sections with Character Limits:**")
-                
-                with st.expander("📋 Enhanced Copy Buttons", expanded=True):
-                    # Primary SEO elements with character limits
-                    st.markdown("**🔥 Primary SEO Elements:**")
-                    
-                    # SEO Title with character count and status
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        if st.button(f"{title_color} Copy SEO Title ({seo_title_len}/60)", key="copy_seo_title"):
-                            st.code(seo_title, language=None)
-                    with col2:
-                        limit_status = "✅ Optimal" if 50 <= seo_title_len <= 60 else "⚠️ Adjust"
-                        st.markdown(f"**{limit_status}**")
-                    
-                    # Meta Description with character count and status
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        if st.button(f"{desc_color} Copy Meta Description ({meta_desc_len}/160)", key="copy_meta_desc"):
-                            st.code(meta_desc, language=None)
-                    with col2:
-                        limit_status = "✅ Optimal" if 150 <= meta_desc_len <= 160 else "⚠️ Adjust"
-                        st.markdown(f"**{limit_status}**")
-                    
-                    # Permalink with character count and status
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        if st.button(f"{permalink_color} Copy Permalink ({permalink_len}/75)", key="copy_permalink"):
-                            st.code(permalink, language=None)
-                    with col2:
-                        limit_status = "✅ Good" if permalink_len <= 75 else "⚠️ Too Long"
-                        st.markdown(f"**{limit_status}**")
-                    
-                    st.markdown("---")
-                    
-                    # Secondary SEO elements
-                    st.markdown("**📝 Keywords & Tags:**")
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if st.button("📋 Copy Focus Keyword", key="copy_focus_kw"):
-                            st.code(metadata.get('focus_keyword', 'N/A'), language=None)
-                        
-                        if st.button("📋 Copy Secondary Keywords", key="copy_secondary_kw"):
-                            keywords = metadata.get('secondary_keywords', [])
-                            st.code(', '.join(keywords) if keywords else 'N/A', language=None)
-                    
-                    with col2:
-                        if st.button("📋 Copy Additional Tags", key="copy_tags"):
-                            tags = metadata.get('additional_tags', [])
-                            st.code(', '.join(tags) if tags else 'N/A', language=None)
-                    
-                    # Social Media elements
-                    st.markdown("---")
-                    st.markdown("**📱 Social Media Copy:**")
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if st.button("📋 Copy Open Graph Title", key="copy_og_title"):
-                            st.code(metadata.get('og_title', 'N/A'), language=None)
-                            
-                        if st.button("📋 Copy Open Graph Description", key="copy_og_desc"):
-                            st.code(metadata.get('og_description', 'N/A'), language=None)
-                    
-                    with col2:
-                        if st.button("📋 Copy Twitter Title", key="copy_twitter_title"):
-                            st.code(metadata.get('twitter_title', 'N/A'), language=None)
-                            
-                        if st.button("📋 Copy Twitter Description", key="copy_twitter_desc"):
-                            st.code(metadata.get('twitter_description', 'N/A'), language=None)
-                
-                # Show generation info
-                if metadata.get('fallback'):
-                    st.warning("⚠️ This metadata was generated using fallback values due to an error in the AI generation.")
-                
-                st.info(f"📅 Generated: {metadata.get('generated_at', 'Unknown time')}")
+        st.info(f"📅 Generated: {metadata.get('generated_at', 'Unknown time')}")
         
         # Step 2: Image Prompt Generation
         st.markdown("---")
@@ -3353,6 +3186,12 @@ with col2:
             if st.session_state.get("js_recipe_card"):
                 st.text_area("Copy & Paste the JavaScript below", value=st.session_state["js_recipe_card"], height=260, key="js_recipe_card_full_textarea")
                 st.download_button("💾 Download JS file", data=st.session_state["js_recipe_card"], file_name="tasty_recipe_fill.js", mime="text/javascript", use_container_width=True, key="download_js_full")
+                components.html(f"""
+<div style=\"display:flex; justify-content:flex-end; margin-top:6px;\">
+  <button onclick=\"navigator.clipboard.writeText(document.getElementById('js_full_copy').value); this.innerText='Copied!'; setTimeout(()=>this.innerText='📋 Copy JavaScript',1500);\" style=\"padding:6px 10px; font-size:14px;\">📋 Copy JavaScript</button>
+</div>
+<textarea id=\"js_full_copy\" style=\"position:absolute; left:-9999px; top:-9999px;\">{html.escape(st.session_state["js_recipe_card"])}</textarea>
+""", height=40)
                 st.caption("Tip: Paste into your browser console on the Tasty Recipes edit page, then press Enter. This fills all fields including description, ingredients, instructions, notes, times, yield, tags, and nutrition.")
 
 # Gentle nudge for auto-post (explicit click keeps control clear)
@@ -3418,31 +3257,51 @@ def _normalize_recipe_for_tasty(recipe: dict, author_name: str = None) -> dict:
     if isinstance(out.get("keywords"), (list, tuple)):
         out["keywords"] = ", ".join([str(k).strip() for k in out["keywords"] if str(k).strip()])
 
-    # Normalize nutrition with aliases and mirror to top-level keys
+    # Normalize nutrition with aliases, preserve originals, add display-friendly keys, and mirror to top-level
     nut = out.get("nutrition") or {}
     aliases = {
-        "calories": ["calories", "kcal"],
-        "sugar": ["sugar", "sugars"],
-        "sodium": ["sodium", "salt"],
-        "fat": ["fat", "total_fat"],
-        "saturated_fat": ["saturated_fat", "saturated"],
+        "serving_size": ["serving_size", "Serving Size", "Serving", "ServingSize", "Serving size"],
+        "calories": ["calories", "Calories", "kcal", "Kcal", "KCAL"],
+        "sugar": ["sugar", "sugars", "Sugar", "Sugars"],
+        "sodium": ["sodium", "salt", "Sodium", "Salt"],
+        "fat": ["fat", "total_fat", "Total Fat", "Fat", "total fat"],
+        "saturated_fat": ["saturated_fat", "saturated", "Saturated Fat"],
         "unsaturated_fat": [
             "unsaturated_fat",
             "unsaturated",
+            "Unsaturated Fat",
             "polyunsaturated_fat",
             "monounsaturated_fat",
+            "Polyunsaturated Fat",
+            "Monounsaturated Fat",
         ],
-        "trans_fat": ["trans_fat", "trans"],
-        "carbohydrates": ["carbohydrates", "carbs", "total_carbohydrates"],
-        "fiber": ["fiber", "dietary_fiber"],
-        "protein": ["protein", "proteins"],
-        "cholesterol": ["cholesterol"],
+        "trans_fat": ["trans_fat", "trans", "Trans Fat"],
+        "carbohydrates": [
+            "carbohydrates",
+            "carbs",
+            "total_carbohydrates",
+            "Total Carbohydrates",
+            "Carbohydrates",
+            "Total Carbs",
+            "total carbs",
+        ],
+        "fiber": ["fiber", "dietary_fiber", "Dietary Fiber", "Fiber"],
+        "protein": ["protein", "proteins", "Protein"],
+        "cholesterol": ["cholesterol", "Cholesterol"],
     }
+
+    # Preserve original nutrition keys
+    preserved = {}
+    try:
+        preserved.update({str(k): v for k, v in nut.items()})
+    except Exception:
+        preserved = dict(nut)
+
     norm_nut = {}
-    for k, alts in aliases.items():
-        val = out.get(k)
+    for canon, alts in aliases.items():
+        val = out.get(canon)
         if not val:
-            val = nut.get(k)
+            val = nut.get(canon)
         if not val:
             for a in alts:
                 if out.get(a):
@@ -3451,9 +3310,34 @@ def _normalize_recipe_for_tasty(recipe: dict, author_name: str = None) -> dict:
                 if nut.get(a):
                     val = nut.get(a)
                     break
-        norm_nut[k] = val or ""
-    out["nutrition"] = norm_nut
+        norm_nut[canon] = str(val).strip() if (val is not None and str(val).strip()) else ""
+
+    # Merge preserved + canonical + display-friendly
+    preserved.update(norm_nut)
+    display_keys = {
+        "serving_size": "Serving Size",
+        "calories": "Calories",
+        "sugar": "Sugar",
+        "sodium": "Sodium",
+        "fat": "Total Fat",
+        "saturated_fat": "Saturated Fat",
+        "unsaturated_fat": "Unsaturated Fat",
+        "trans_fat": "Trans Fat",
+        "carbohydrates": "Total Carbohydrates",
+        "fiber": "Dietary Fiber",
+        "protein": "Protein",
+        "cholesterol": "Cholesterol",
+    }
+    for canon, pretty in display_keys.items():
+        if norm_nut.get(canon):
+            preserved.setdefault(pretty, norm_nut[canon])
+
+    out["nutrition"] = preserved
+    # Mirror to top-level for convenience
     out.update(norm_nut)
+    # Set top-level serving_size from nutrition if missing
+    if not out.get("serving_size") and norm_nut.get("serving_size"):
+        out["serving_size"] = norm_nut["serving_size"]
 
     return out
 
@@ -3475,7 +3359,8 @@ with st.container():
             )
             if recipe and (recipe.get("ingredients") or recipe.get("instructions")):
                 recipe = _make_recipe_halal(recipe)
-                st.session_state["js_recipe_card_ai"] = generate_js_recipe_card(recipe)
+                normalized = _normalize_recipe_for_tasty(recipe, author_name=st.session_state.get("author_name", ""))
+                st.session_state["js_recipe_card_ai"] = generate_js_recipe_card(normalized)
                 st.success("AI-generated JavaScript snippet ready below. Paste it into your browser console on the Tasty Recipes edit page.")
             else:
                 st.warning("AI could not synthesize a recipe from your inputs. Please ensure your article includes recipe details or provide them in 'Full Recipe'.")
@@ -3485,6 +3370,12 @@ with st.container():
     if st.session_state.get("js_recipe_card_ai"):
         st.text_area("Copy & Paste the JavaScript below (AI)", value=st.session_state["js_recipe_card_ai"], height=260, key="js_recipe_card_ai_textarea")
         st.download_button("💾 Download AI JS file", data=st.session_state["js_recipe_card_ai"], file_name="tasty_recipe_fill_ai.js", mime="text/javascript", use_container_width=True, key="download_js_ai")
+        components.html(f"""
+<div style=\"display:flex; justify-content:flex-end; margin-top:6px;\">
+  <button onclick=\"navigator.clipboard.writeText(document.getElementById('js_ai_copy').value); this.innerText='Copied!'; setTimeout(()=>this.innerText='📋 Copy JavaScript (AI)',1500);\" style=\"padding:6px 10px; font-size:14px;\">📋 Copy JavaScript (AI)</button>
+</div>
+<textarea id=\"js_ai_copy\" style=\"position:absolute; left:-9999px; top:-9999px;\">{html.escape(st.session_state["js_recipe_card_ai"])}</textarea>
+""", height=40)
         st.caption("Tip: Paste into your browser console on the Tasty Recipes edit page, then press Enter. This fills description, ingredients, instructions, notes, times, yield, tags, and nutrition.")
 
 if st.session_state.get("auto_post") and st.session_state.get("generated_md"):
