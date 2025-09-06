@@ -99,7 +99,7 @@ def load_settings_into_session():
         if SETTINGS_FILE.exists():
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8", errors="ignore"))
             for k, v in data.items():
-                if k == "OPENAI_API_KEY":
+                if k == "API_KEY":
                     continue
                 st.session_state[k] = v
         st.session_state["_settings_loaded"] = True
@@ -110,7 +110,7 @@ def save_current_settings():
     try:
         keys = [
             # auth (do NOT persist API keys)
-            # "OPENAI_API_KEY",  # removed: use .env only
+            # "API_KEY",  # removed: use .env only
 
             # social + CTA
             "fb_url","pin_url","append_cta",
@@ -144,7 +144,7 @@ load_settings_into_session()
 # OpenAI client
 # ---------------------------------------------------------
 def get_client():
-    key = os.getenv("OPENAI_API_KEY")
+    key = os.getenv("API_KEY")
     if not key:
         # Lazy-load .env now in case settings haven't been loaded yet
         try:
@@ -172,13 +172,13 @@ def get_client():
             except Exception:
                 pass
         # Try again after loading
-        key = os.getenv("OPENAI_API_KEY")
+        key = os.getenv("API_KEY")
     if not key:
         try:
-            st.sidebar.error("OPENAI_API_KEY not found. Add it to your .env file.")
+            st.sidebar.error("API_KEY not found. Add it to your .env file.")
         except Exception:
             pass
-        raise RuntimeError("OPENAI_API_KEY missing")
+        raise RuntimeError("API_KEY missing")
     return OpenAI(api_key=key)
 
 # ---------------------------------------------------------
@@ -2079,8 +2079,8 @@ st.caption("Auto-internal-linking from your sitemap + CTA + one-click publish to
 
 # Sidebar: API key
 with st.sidebar:
-    if not os.getenv("OPENAI_API_KEY"):
-        st.info("Set OPENAI_API_KEY in a .env file next to app1.py (or export it in your shell). Create a .env file with a line: OPENAI_API_KEY=sk-... (the file is already in .gitignore).")
+    if not os.getenv("API_KEY"):
+        st.info("Set API_KEY in a .env file next to app1.py (or export it in your shell). Create a .env file with a line: API_KEY=sk-... (the file is already in .gitignore).")
 
 # Sidebar: Writer Identity
 with st.sidebar:

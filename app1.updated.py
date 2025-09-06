@@ -1824,10 +1824,10 @@ st.caption("Auto-internal-linking from your sitemap + CTA + one-click publish to
 # Sidebar: API key
 with st.sidebar:
     st.subheader("🔑 OpenAI")
-    _k = st.text_input("OpenAI API Key", type="password", value=st.session_state.get("OPENAI_API_KEY", ""))
+    _k = st.text_input("OpenAI API Key", type="password", value=st.session_state.get("API_KEY", ""))
     if _k:
-        st.session_state["OPENAI_API_KEY"] = _k
-    st.caption(f"API key detected: {bool(st.session_state.get('OPENAI_API_KEY') or os.getenv('OPENAI_API_KEY'))}")
+        st.session_state["API_KEY"] = _k
+    st.caption(f"API key detected: {bool(st.session_state.get('API_KEY') or os.getenv('API_KEY'))}")
 
 # Sidebar: Writer Identity
 with st.sidebar:

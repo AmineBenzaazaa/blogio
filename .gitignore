@@ -26,6 +26,8 @@ PYTHONPATH
 .venv/
 venv/
 ENV/
+env/
+.env
 
 # IDE
 .vscode/
