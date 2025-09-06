@@ -3459,5 +3459,241 @@ with st.container():
 """, height=40)
         st.caption("Tip: Paste into your browser console on the Tasty Recipes edit page, then press Enter. This fills description, ingredients, instructions, notes, times, yield, tags, and nutrition.")
 
+# --- Step 6: Generate Recipe JSON-LD (Schema.org) from the published post ---
+st.markdown("---")
+st.markdown("### 🚀 Step 6: Recipe JSON-LD (Schema.org)")
+st.caption("Only includes fields we can confidently extract. No fake data. Paste your published post URL below.")
+
+# Helper: find Recipe JSON-LD already present in the page (if any)
+def _find_recipe_jsonld_in_html(html_text: str):
+    try:
+        scripts = re.findall(r"<script[^>]+type=\"(?:application|text)/ld\+json\"[^>]*>(.*?)</script>", html_text, flags=re.I | re.S)
+        for block in scripts:
+            block = block.strip()
+            if not block:
+                continue
+            try:
+                data = json.loads(block)
+            except Exception:
+                # Some pages include multiple JSON objects concatenated; attempt a naive fix by wrapping in [] and splitting
+                parts = re.split(r"}\s*,\s*{", block)
+                if len(parts) > 1:
+                    try:
+                        data = json.loads(f"[{block}]")
+                    except Exception:
+                        continue
+                else:
+                    continue
+            # Normalize to list for iteration
+            candidates = data if isinstance(data, list) else [data]
+            for item in candidates:
+                if isinstance(item, dict):
+                    atype = item.get("@type")
+                    if isinstance(atype, list):
+                        if any(str(t).lower() == "recipe" for t in atype):
+                            return item
+                    elif isinstance(atype, str) and atype.lower() == "recipe":
+                        return item
+    except Exception:
+        pass
+    return None
+
+# Helper: extract OpenGraph image from page
+def _extract_og_image(html_text: str) -> str:
+    m = re.search(r"<meta[^>]+property=\"og:image\"[^>]+content=\"([^\"]+)\"", html_text, flags=re.I)
+    if m:
+        return m.group(1)
+    return ""
+
+# Helper: normalize lists for schema
+def _norm_list(val):
+    if not val:
+        return []
+    if isinstance(val, list):
+        return [str(x).strip() for x in val if str(x).strip()]
+    if isinstance(val, str):
+        return [x.strip() for x in re.split(r"\n+|;", val) if x.strip()]
+    return []
+
+# Helper: Build Recipe JSON-LD using only known data
+def _build_recipe_schema(recipe: dict, page_url: str = "", name: str = "", description: str = "", image: str = "", author: str = "", keywords: str = "") -> dict:
+    schema = {"@context": "https://schema.org", "@type": "Recipe"}
+
+    if name:
+        schema["name"] = name
+    if description:
+        schema["description"] = description
+    if image:
+        schema["image"] = image
+    if author:
+        schema["author"] = {"@type": "Person", "name": author}
+    if keywords:
+        schema["keywords"] = keywords
+
+    # Yield / servings
+    ry = recipe.get("yield") or recipe.get("servings") or recipe.get("recipe_yield")
+    if ry:
+        schema["recipeYield"] = str(ry)
+
+    # Times (minutes to ISO 8601)
+    def _mins(*keys):
+        for k in keys:
+            v = recipe.get(k)
+            if isinstance(v, (int, float)):
+                return int(v)
+            if isinstance(v, str):
+                # extract digits
+                m = re.search(r"(\d+)", v)
+                if m:
+                    return int(m.group(1))
+        return None
+
+    pt = _mins("prep_time_min", "prepTimeMinutes", "prep_time")
+    ct = _mins("cook_time_min", "cookTimeMinutes", "cook_time")
+    tt = _mins("total_time_min", "totalTimeMinutes", "total_time")
+    from_minutes = _to_iso8601_minutes  # already defined above in this file
+    if pt is not None:
+        iso = from_minutes(pt)
+        if iso:
+            schema["prepTime"] = iso
+    if ct is not None:
+        iso = from_minutes(ct)
+        if iso:
+            schema["cookTime"] = iso
+    if tt is not None:
+        iso = from_minutes(tt)
+        if iso:
+            schema["totalTime"] = iso
+
+    # Ingredients / Instructions
+    ings = _norm_list(recipe.get("ingredients") or recipe.get("recipeIngredient"))
+    if ings:
+        schema["recipeIngredient"] = ings
+
+    instr = _norm_list(recipe.get("instructions") or recipe.get("recipeInstructions"))
+    if instr:
+        # If already objects, keep them; else convert to HowToStep
+        if instr and isinstance(instr[0], dict):
+            schema["recipeInstructions"] = instr
+        else:
+            schema["recipeInstructions"] = [{"@type": "HowToStep", "text": s} for s in instr]
+
+    # Nutrition
+    nut = recipe.get("nutrition")
+    if isinstance(nut, dict):
+        # Keep only known simple fields
+        keep = {k: v for k, v in nut.items() if v}
+        if keep:
+            schema["nutrition"] = keep
+
+    # mainEntityOfPage
+    if page_url:
+        schema["mainEntityOfPage"] = {"@type": "WebPage", "@id": page_url}
+
+    return schema
+
+# UI: Only enable when we have a published link
+post_url_default = st.session_state.get("wp_last_post_link", "")
+post_url = st.text_input("Published Post URL", value=post_url_default, key="schema_post_url", placeholder="https://example.com/your-post/")
+
+if st.button("Extract & Generate Schema JSON-LD", key="build_recipe_schema_btn", use_container_width=True):
+    if not post_url.strip():
+        st.warning("Please paste the published post URL first.")
+    else:
+        try:
+            with st.spinner("Fetching page and extracting data..."):
+                page_html = ""
+                og_image = ""
+                try:
+                    r = requests.get(post_url.strip(), timeout=20)
+                    r.raise_for_status()
+                    page_html = r.text
+                    og_image = _extract_og_image(page_html)
+                except Exception:
+                    page_html = ""
+                # 1) Try to use existing Recipe JSON-LD from the page (no fake data)
+                page_schema = _find_recipe_jsonld_in_html(page_html) if page_html else None
+
+                if page_schema:
+                    # Keep as-is but ensure essential context/type exist
+                    schema_obj = {"@context": "https://schema.org", "@type": "Recipe"}
+                    # Merge with page_schema fields
+                    for k, v in page_schema.items():
+                        if v is not None and k not in ("@context",):
+                            schema_obj[k] = v
+                    # Ensure image present if missing and we have og:image
+                    if "image" not in schema_obj and og_image:
+                        schema_obj["image"] = og_image
+                else:
+                    # 2) Derive from our article and any recipe we can parse (no hallucination)
+                    recipe = None
+                    rtxt = st.session_state.get("recipe_text", "")
+                    if rtxt.strip():
+                        try:
+                            recipe = parse_recipe_text_blocks(rtxt)
+                        except Exception:
+                            recipe = None
+                    if (not recipe) and st.session_state.get("generated_md", "").strip():
+                        try:
+                            extracted = _extract_recipe_from_article_md(st.session_state["generated_md"])  # may be empty
+                            if extracted and (extracted.get("ingredients") or extracted.get("instructions")):
+                                recipe = extracted
+                        except Exception:
+                            recipe = None
+                    if not recipe:
+                        recipe = {}
+
+                    # Compose context values strictly from available data
+                    name = st.session_state.get("seo_title") or st.session_state.get("topic", "")
+                    desc = st.session_state.get("wp_excerpt")
+                    if not desc:
+                        try:
+                            content_md = st.session_state.get("generated_md", "")
+                            if content_md:
+                                desc = excerpt_from_text(md_to_html(content_md), 40)
+                        except Exception:
+                            desc = ""
+                    image_url = og_image or st.session_state.get("feat_url", "")
+                    author_name = st.session_state.get("author_name", "")
+                    kw = st.session_state.get("focus_keyword", "")
+
+                    schema_obj = _build_recipe_schema(
+                        recipe=recipe,
+                        page_url=post_url.strip(),
+                        name=name or "",
+                        description=desc or "",
+                        image=image_url or "",
+                        author=author_name or "",
+                        keywords=kw or "",
+                    )
+
+                # Store and show
+                schema_json = json.dumps(schema_obj, ensure_ascii=False, indent=2)
+                st.session_state["recipe_schema_jsonld"] = schema_json
+
+                # Save to specified markdown file path
+                out_path = "/Users/useraccount/Documents/Blogging/py agents/shemamarkup.md"
+                try:
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        f.write(schema_json)
+                    st.success(f"Saved recipe schema to: {out_path}")
+                except Exception as e:
+                    st.warning(f"Could not write to {out_path}: {e}")
+
+                st.success("Recipe JSON-LD generated.")
+        except Exception as e:
+            st.error(f"Failed to generate schema: {e}")
+
+if st.session_state.get("recipe_schema_jsonld"):
+    st.text_area("Generated JSON-LD", value=st.session_state["recipe_schema_jsonld"], height=260, key="schema_jsonld_textarea")
+    st.download_button(
+        "💾 Download recipe.schema.json",
+        data=st.session_state["recipe_schema_jsonld"].encode("utf-8"),
+        file_name="recipe.schema.json",
+        mime="application/ld+json",
+        use_container_width=True,
+        key="download_recipe_schema_jsonld",
+    )
+
 if st.session_state.get("auto_post") and st.session_state.get("generated_md"):
     st.info("Auto-post is enabled. Click 'Post to WordPress' to publish the current draft.")
