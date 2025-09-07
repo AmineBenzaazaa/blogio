@@ -2195,8 +2195,8 @@ with st.sidebar:
     st.session_state["wp_app_pw"] = wp_app_pw
     
     # Focus Keyword with Post status and Categories grouped together
-    wp_focus_keyword = st.text_input("Focus Keyword", value=st.session_state.get("wp_focus_keyword", ""))
-    st.session_state["wp_focus_keyword"] = wp_focus_keyword
+    # wp_focus_keyword = st.text_input("Focus Keyword", value=st.session_state.get("wp_focus_keyword", ""))
+    # st.session_state["wp_focus_keyword"] = wp_focus_keyword
     
     col1, col2 = st.columns(2)
     with col1:
@@ -2231,16 +2231,6 @@ with st.sidebar:
     
     st.caption("Tip: Use an Administrator Application Password so CPT endpoints/shortcodes work and HTML isn't stripped.")
 
-# Sidebar: Featured Image (single, de-duplicated)
-with st.sidebar:
-    st.subheader("🖼️ Featured Image")
-    feat_url = st.text_input("Featured image URL (optional)", value=st.session_state.get("feat_url", ""))
-    st.session_state["feat_url"] = feat_url
-    feat_file = st.file_uploader("Or upload image", type=["jpg","jpeg","png","webp"])
-    if feat_file is not None:
-        st.session_state["feat_file"] = feat_file
-    auto_post = st.checkbox("Auto-post to WordPress after generation", value=st.session_state.get("auto_post", False))
-    st.session_state["auto_post"] = auto_post
 
 # Sidebar: Save settings
 with st.sidebar:
