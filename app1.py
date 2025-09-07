@@ -640,7 +640,19 @@ def _make_recipe_halal(recipe: Dict[str, Any]) -> Dict[str, Any]:
     new_recipe["description"] = _repl_text(recipe.get("description", ""))
     new_recipe["ingredients"] = [_repl_text(x) for x in recipe.get("ingredients", [])]
     new_recipe["instructions"] = [_repl_text(x) for x in recipe.get("instructions", [])]
-    new_recipe["notes"] = [_repl_text(x) for x in recipe.get("notes", [])]
+    raw_notes = recipe.get("notes", [])
+    normalized_notes = []
+    if isinstance(raw_notes, str):
+        normalized_notes = [s.strip() for s in raw_notes.splitlines() if s.strip()]
+    elif isinstance(raw_notes, (list, tuple)):
+        normalized_notes = [str(x).strip() for x in raw_notes if str(x).strip()]
+    else:
+        if raw_notes:
+            try:
+                normalized_notes = [str(raw_notes).strip()]
+            except Exception:
+                normalized_notes = []
+    new_recipe["notes"] = [_repl_text(x) for x in normalized_notes]
     new_recipe["keywords"] = [_repl_text(x) for x in recipe.get("keywords", [])]
     if isinstance(recipe.get("nutrition"), dict):
         new_recipe["nutrition"] = {k: _repl_text(v) for k, v in recipe["nutrition"].items()}
@@ -733,10 +745,29 @@ def generate_js_recipe_card(recipe: Dict[str, Any]) -> str:
         return text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "")
     
     def format_list_for_js(items: List[str], formatter: str = "p") -> str:
-        """Format list items for JavaScript template literal."""
-        if not items:
+        """Format list items for JavaScript template literal.
+        Accepts list/tuple or a single string; splits multi-line strings into items and strips bullet chars.
+        """
+        if items is None:
             return ""
-        escaped_items = [js_escape(item) for item in items]
+        # Normalize input to a flat list of strings (not characters)
+        norm_items: List[str] = []
+        if isinstance(items, str):
+            candidates = items.splitlines()
+        elif isinstance(items, (list, tuple)):
+            candidates = []
+            for it in items:
+                if isinstance(it, str):
+                    candidates.extend(it.splitlines())
+                else:
+                    candidates.append(str(it))
+        else:
+            candidates = [str(items)]
+        for p in candidates:
+            p = p.strip("•- \t")
+            if p:
+                norm_items.append(p)
+        escaped_items = [js_escape(item) for item in norm_items]
         # Return plain newline-separated items; the JS p()/n() helpers will wrap/number them in the editor.
         return "\\n".join(escaped_items)
     
@@ -3441,12 +3472,12 @@ with st.container():
     if st.session_state.get("js_recipe_card_ai"):
         st.text_area("Copy & Paste the JavaScript below (AI)", value=st.session_state["js_recipe_card_ai"], height=260, key="js_recipe_card_ai_textarea")
         st.download_button("💾 Download AI JS file", data=st.session_state["js_recipe_card_ai"], file_name="tasty_recipe_fill_ai.js", mime="text/javascript", use_container_width=True, key="download_js_ai")
-        components.html(f"""
-<div style=\"display:flex; justify-content:flex-end; margin-top:6px;\">
-  <button onclick=\"navigator.clipboard.writeText(document.getElementById('js_ai_copy').value); this.innerText='Copied!'; setTimeout(()=>this.innerText='📋 Copy JavaScript (AI)',1500);\" style=\"padding:6px 10px; font-size:14px;\">📋 Copy JavaScript (AI)</button>
-</div>
-<textarea id=\"js_ai_copy\" style=\"position:absolute; left:-9999px; top:-9999px;\">{html.escape(st.session_state["js_recipe_card_ai"])}</textarea>
-""", height=40)
+#         components.html(f"""
+# <div style=\"display:flex; justify-content:flex-end; margin-top:6px;\">
+#   <button onclick=\"navigator.clipboard.writeText(document.getElementById('js_ai_copy').value); this.innerText='Copied!'; setTimeout(()=>this.innerText='📋 Copy JavaScript (AI)',1500);\" style=\"padding:6px 10px; font-size:14px;\">📋 Copy JavaScript (AI)</button>
+# </div>
+# <textarea id=\"js_ai_copy\" style=\"position:absolute; left:-9999px; top:-9999px;\">{html.escape(st.session_state["js_recipe_card_ai"])}</textarea>
+# """, height=40)
         st.caption("Tip: Paste into your browser console on the Tasty Recipes edit page, then press Enter. This fills description, ingredients, instructions, notes, times, yield, tags, and nutrition.")
 
 # --- Step 6: Generate Recipe JSON-LD (Schema.org) from the published post ---
